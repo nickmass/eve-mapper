@@ -9,10 +9,9 @@ pub const EVE_SANS_NEUE: &[u8] = include_bytes!("../fonts/evesansneue-regular.ot
 pub struct TextVertex {
     position: math::V2<f32>,
     uv: math::V2<f32>,
-    color: math::V3<f32>,
-    alpha: f32,
+    color: math::V4<f32>,
 }
-glium::implement_vertex!(TextVertex, position, uv, color, alpha);
+glium::implement_vertex!(TextVertex, position, uv, color);
 
 #[derive(Copy, Clone, Debug)]
 pub struct FontId(pub usize);
@@ -80,8 +79,7 @@ impl FontCache {
         buffer: &mut Vec<TextVertex>,
         scale: f32,
         position: math::V2<f32>,
-        color: math::V3<f32>,
-        alpha: f32,
+        color: math::V4<f32>,
         window_size: math::V2<f32>,
     ) -> Option<()> {
         if let Some(font) = self.get(font_id) {
@@ -134,61 +132,30 @@ impl FontCache {
                 if let Ok(Some((tex_coords, screen_coords))) =
                     self.cache.borrow().rect_for(font_id.0, glyph)
                 {
-                    let screen_coords_min = math::v2(
-                        screen_coords.min.x as f32,
-                        window_size.y - screen_coords.min.y as f32,
-                    );
-                    let screen_coords_max = math::v2(
-                        screen_coords.max.x as f32,
-                        window_size.y - screen_coords.max.y as f32,
-                    );
+                    let screen_coords_min =
+                        math::v2(screen_coords.min.x, screen_coords.min.y).as_f32();
+                    let screen_coords_max =
+                        math::v2(screen_coords.max.x, screen_coords.max.y).as_f32();
 
                     let screen_coords_min = math::v2(screen_coords_min.x, screen_coords_min.y);
                     let screen_coords_max = math::v2(screen_coords_max.x, screen_coords_max.y);
-                    let screen_coords_min_max = math::v2(screen_coords_min.x, screen_coords_max.y);
-                    let screen_coords_max_min = math::v2(screen_coords_max.x, screen_coords_min.y);
 
                     let tex_coords_min = math::v2(tex_coords.min.x, tex_coords.min.y);
                     let tex_coords_max = math::v2(tex_coords.max.x, tex_coords.max.y);
-                    let tex_coords_min_max = math::v2(tex_coords.min.x, tex_coords.max.y);
-                    let tex_coords_max_min = math::v2(tex_coords.max.x, tex_coords.min.y);
 
-                    buffer.push(TextVertex {
-                        position: screen_coords_min,
-                        uv: tex_coords_min,
-                        color,
-                        alpha,
-                    });
-                    buffer.push(TextVertex {
-                        position: screen_coords_min_max,
-                        uv: tex_coords_min_max,
-                        color,
-                        alpha,
-                    });
-                    buffer.push(TextVertex {
-                        position: screen_coords_max_min,
-                        uv: tex_coords_max_min,
-                        color,
-                        alpha,
-                    });
-                    buffer.push(TextVertex {
-                        position: screen_coords_max,
-                        uv: tex_coords_max,
-                        color,
-                        alpha,
-                    });
-                    buffer.push(TextVertex {
-                        position: screen_coords_max_min,
-                        uv: tex_coords_max_min,
-                        color,
-                        alpha,
-                    });
-                    buffer.push(TextVertex {
-                        position: screen_coords_min_max,
-                        uv: tex_coords_min_max,
-                        color,
-                        alpha,
-                    });
+                    let screen_rect = math::Rect::new(screen_coords_min, screen_coords_max);
+                    let tex_rect = math::Rect::new(tex_coords_min, tex_coords_max);
+
+                    for (position, uv) in screen_rect
+                        .triangle_list_iter()
+                        .zip(tex_rect.triangle_list_iter())
+                    {
+                        buffer.push(TextVertex {
+                            position: math::v2(position.x, window_size.y - position.y),
+                            uv,
+                            color,
+                        });
+                    }
                 }
             }
 

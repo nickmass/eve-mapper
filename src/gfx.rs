@@ -36,8 +36,7 @@ struct TextNode {
     scale: f32,
     position: math::V2<f32>,
     text: String,
-    color: math::V3<f32>,
-    alpha: f32,
+    color: math::V4<f32>,
 }
 
 struct GraphicsState {
@@ -411,8 +410,7 @@ impl Window {
                     font: graphics_state.ui_font,
                     scale: 25.0,
                     position: pos,
-                    alpha,
-                    color,
+                    color: color.expand(alpha),
                 };
 
                 graphics_state.text_nodes.push(node);
@@ -424,8 +422,7 @@ impl Window {
             font: graphics_state.ui_font,
             scale: 130.0,
             position: math::v2(480.0, 20.0),
-            alpha: 1.0,
-            color: math::V3::fill(1.0),
+            color: math::V4::fill(1.0),
         };
 
         graphics_state.text_nodes.push(node);
@@ -442,7 +439,6 @@ impl Window {
                         text.scale,
                         text.position,
                         text.color,
-                        text.alpha,
                         window_size,
                     )
                     .unwrap();
@@ -620,9 +616,21 @@ unsafe impl glium::vertex::Attribute for math::V3<f32> {
     }
 }
 
+unsafe impl glium::vertex::Attribute for math::V4<f32> {
+    fn get_type() -> glium::vertex::AttributeType {
+        glium::vertex::AttributeType::F32F32F32F32
+    }
+}
+
 unsafe impl glium::vertex::Attribute for math::M3<f32> {
     fn get_type() -> glium::vertex::AttributeType {
         glium::vertex::AttributeType::F32x3x3
+    }
+}
+
+unsafe impl glium::vertex::Attribute for math::M4<f32> {
+    fn get_type() -> glium::vertex::AttributeType {
+        glium::vertex::AttributeType::F32x4x4
     }
 }
 
@@ -638,12 +646,29 @@ impl glium::uniforms::AsUniformValue for math::V3<f32> {
     }
 }
 
+impl glium::uniforms::AsUniformValue for math::V4<f32> {
+    fn as_uniform_value(&self) -> glium::uniforms::UniformValue {
+        glium::uniforms::UniformValue::Vec4([self.x, self.y, self.z, self.w])
+    }
+}
+
 impl glium::uniforms::AsUniformValue for math::M3<f32> {
     fn as_uniform_value(&self) -> glium::uniforms::UniformValue {
         glium::uniforms::UniformValue::Mat3([
             [self.c0.x, self.c0.y, self.c0.z],
             [self.c1.x, self.c1.y, self.c1.z],
             [self.c2.x, self.c2.y, self.c2.z],
+        ])
+    }
+}
+
+impl glium::uniforms::AsUniformValue for math::M4<f32> {
+    fn as_uniform_value(&self) -> glium::uniforms::UniformValue {
+        glium::uniforms::UniformValue::Mat4([
+            [self.c0.x, self.c0.y, self.c0.z, self.c0.w],
+            [self.c1.x, self.c1.y, self.c1.z, self.c1.w],
+            [self.c2.x, self.c2.y, self.c2.z, self.c2.w],
+            [self.c3.x, self.c3.y, self.c3.z, self.c3.w],
         ])
     }
 }
