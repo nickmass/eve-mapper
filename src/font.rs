@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use crate::math;
 
 pub const EVE_SANS_NEUE: &[u8] = include_bytes!("../fonts/evesansneue-regular.otf");
+pub const EVE_SANS_NEUE_BOLD: &[u8] = include_bytes!("../fonts/evesansneue-bold.otf");
+pub const TRIGLAVIAN: &[u8] = include_bytes!("../fonts/triglavian.ttf");
 
 #[derive(Clone, Copy, Debug)]
 pub struct TextVertex {
@@ -78,9 +80,11 @@ impl FontCache {
         text: &str,
         buffer: &mut Vec<TextVertex>,
         scale: f32,
+        anchor: TextAnchor,
         position: math::V2<f32>,
         color: math::V4<f32>,
         window_size: math::V2<f32>,
+        shadow: bool,
     ) -> Option<()> {
         if let Some(font) = self.get(font_id) {
             let scale = rusttype::Scale::uniform(scale);
@@ -89,6 +93,7 @@ impl FontCache {
             let mut positioned_glyphs = Vec::new();
 
             let mut prev_glyph_id = None;
+            let mut text_area: Option<math::Rect<_>> = None;
             for glyph in text.chars().map(|c| font.glyph(c)) {
                 if let Some(prev_glyph) = prev_glyph_id {
                     let kerning = font.pair_kerning(scale, prev_glyph, glyph.id());
@@ -100,6 +105,29 @@ impl FontCache {
                 let h_metrics = glyph.h_metrics();
 
                 let glyph = glyph.positioned(rusttype::point(advance.x, advance.y));
+
+                if let Some(bounds) = glyph.pixel_bounding_box() {
+                    if let Some(text_area) = text_area.as_mut() {
+                        if bounds.min.x < text_area.min.x {
+                            text_area.min.x = bounds.min.x;
+                        }
+                        if bounds.min.y < text_area.min.y {
+                            text_area.min.y = bounds.min.y;
+                        }
+                        if bounds.max.x > text_area.max.x {
+                            text_area.max.x = bounds.max.x;
+                        }
+                        if bounds.max.y > text_area.max.y {
+                            text_area.max.y = bounds.max.y;
+                        }
+                    } else {
+                        text_area = Some(math::Rect::new(
+                            math::v2(bounds.min.x, bounds.min.y),
+                            math::v2(bounds.max.x, bounds.max.y),
+                        ))
+                    }
+                }
+
                 self.cache
                     .borrow_mut()
                     .queue_glyph(font_id.0, glyph.clone());
@@ -107,6 +135,12 @@ impl FontCache {
 
                 advance.x += h_metrics.advance_width;
             }
+
+            let offset = if let Some(text_area) = text_area.as_ref() {
+                text_area.offset(anchor)
+            } else {
+                math::v2(0, 0)
+            };
 
             self.cache
                 .borrow_mut()
@@ -133,9 +167,9 @@ impl FontCache {
                     self.cache.borrow().rect_for(font_id.0, glyph)
                 {
                     let screen_coords_min =
-                        math::v2(screen_coords.min.x, screen_coords.min.y).as_f32();
+                        (math::v2(screen_coords.min.x, screen_coords.min.y) + offset).as_f32();
                     let screen_coords_max =
-                        math::v2(screen_coords.max.x, screen_coords.max.y).as_f32();
+                        (math::v2(screen_coords.max.x, screen_coords.max.y) + offset).as_f32();
 
                     let screen_coords_min = math::v2(screen_coords_min.x, screen_coords_min.y);
                     let screen_coords_max = math::v2(screen_coords_max.x, screen_coords_max.y);
@@ -145,6 +179,22 @@ impl FontCache {
 
                     let screen_rect = math::Rect::new(screen_coords_min, screen_coords_max);
                     let tex_rect = math::Rect::new(tex_coords_min, tex_coords_max);
+
+                    if shadow {
+                        for (position, uv) in screen_rect
+                            .triangle_list_iter()
+                            .zip(tex_rect.triangle_list_iter())
+                        {
+                            buffer.push(TextVertex {
+                                position: math::v2(
+                                    position.x + 3.0,
+                                    window_size.y - position.y - 3.0,
+                                ),
+                                uv,
+                                color: math::V3::fill(0.01).expand(color.w),
+                            });
+                        }
+                    }
 
                     for (position, uv) in screen_rect
                         .triangle_list_iter()
@@ -164,4 +214,39 @@ impl FontCache {
             None
         }
     }
+}
+
+trait TextRectExt<T> {
+    fn offset(&self, anchor: TextAnchor) -> math::V2<T>;
+}
+
+impl TextRectExt<i32> for math::Rect<i32> {
+    fn offset(&self, anchor: TextAnchor) -> math::V2<i32> {
+        let x = match anchor {
+            TextAnchor::TopLeft | TextAnchor::Left | TextAnchor::BottomLeft => 0,
+            TextAnchor::TopRight | TextAnchor::Right | TextAnchor::BottomRight => self.width(),
+            TextAnchor::Top | TextAnchor::Center | TextAnchor::Bottom => self.width() / 2,
+        };
+
+        let y = match anchor {
+            TextAnchor::TopLeft | TextAnchor::Top | TextAnchor::TopRight => 0,
+            TextAnchor::BottomLeft | TextAnchor::Bottom | TextAnchor::BottomRight => self.height(),
+            TextAnchor::Left | TextAnchor::Center | TextAnchor::Right => self.height() / 2,
+        };
+
+        math::v2(-x, -y)
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum TextAnchor {
+    Center,
+    Top,
+    TopLeft,
+    Left,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+    Right,
+    TopRight,
 }

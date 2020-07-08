@@ -506,6 +506,7 @@ impl<T: Copy> Iterator for TriangleListIter<T> {
     }
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 

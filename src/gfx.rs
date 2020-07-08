@@ -1,34 +1,55 @@
 use glium::glutin;
 use glium::Surface;
-use glutin::event_loop::{ControlFlow, EventLoop};
+use glutin::event::{Event, MouseButton, VirtualKeyCode};
+use glutin::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use glutin::window::WindowBuilder;
 
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
+use crate::error::*;
 use crate::font;
 use crate::math;
 use crate::shaders;
+use crate::world::{JumpType, World};
 
-type UserEvent = ();
+mod map;
+use map::Map;
 
-#[derive(Copy, Clone, Debug)]
-enum EventResult {
-    Redraw,
-    Close,
-    Nothing,
+#[derive(Clone, Debug)]
+pub enum UserEvent {
+    DataEvent(DataEvent),
+    MapEvent(MapEvent),
+    QueryEvent(QueryEvent),
+}
+
+#[derive(Clone, Debug)]
+pub enum DataEvent {
+    CharacterLocationChanged(Option<i32>),
+}
+
+#[derive(Clone, Debug)]
+pub enum MapEvent {
+    SelectedSystemChanged(Option<i32>),
+}
+
+#[derive(Clone, Debug)]
+pub enum QueryEvent {
+    SystemsFocused(HashSet<i32>),
+    RouteChanged,
 }
 
 pub struct Window {
     event_loop: EventLoop<UserEvent>,
     user_state: UserState,
     graphics_state: GraphicsState,
+    graphics_context: GraphicsContext,
 }
 
 struct UserState {
-    mouse_down: Option<math::V2<f32>>,
-    mouse_position: math::V2<f32>,
-    map_offset: math::V2<f32>,
-    window_size: math::V2<u32>,
-    closed: bool,
-    zoom: f32,
+    query_string: String,
+    selected_system: Option<i32>,
 }
 
 struct TextNode {
@@ -36,11 +57,24 @@ struct TextNode {
     scale: f32,
     position: math::V2<f32>,
     text: String,
+    anchor: font::TextAnchor,
     color: math::V4<f32>,
+    shadow: bool,
+}
+
+pub struct GraphicsContext {
+    pub display: glium::Display,
+    pub ui_font: font::FontId,
+    pub title_font: font::FontId,
+}
+
+impl GraphicsContext {
+    pub fn request_redraw(&self) {
+        self.display.gl_window().window().request_redraw()
+    }
 }
 
 struct GraphicsState {
-    display: glium::Display,
     circle_model: glium::VertexBuffer<CircleVertex>,
     system_program: glium::Program,
     jump_program: glium::Program,
@@ -48,16 +82,18 @@ struct GraphicsState {
     shader_collection: shaders::ShaderCollection,
     shader_version: usize,
     ui_font: font::FontId,
+    title_font: font::FontId,
     font_cache: font::FontCache,
     text_nodes: Vec<TextNode>,
 }
 
 impl Window {
     pub fn new(width: u32, height: u32) -> Self {
-        let event_loop = EventLoop::new();
+        let event_loop = EventLoop::with_user_event();
         let w_builder = WindowBuilder::new()
             .with_inner_size(glutin::dpi::LogicalSize::new(width, height))
-            .with_transparent(false);
+            .with_transparent(false)
+            .with_title("EVE Mapper");
         let c_builder = glutin::ContextBuilder::new()
             .with_vsync(true)
             .with_gl_profile(glutin::GlProfile::Core)
@@ -100,11 +136,13 @@ impl Window {
         let text_program =
             glium::Program::from_source(&display, &text_vert, &text_frag, None).unwrap();
 
-        let mut font_cache = font::FontCache::new(&display, 1024, 1024);
+        let mut font_cache = font::FontCache::new(&display, 1024 * 4, 1024 * 4);
         let ui_font = font_cache.load("evesans", font::EVE_SANS_NEUE).unwrap();
+        let title_font = font_cache
+            .load("evesans-bold", font::EVE_SANS_NEUE_BOLD)
+            .unwrap();
 
         let graphics_state = GraphicsState {
-            display,
             circle_model,
             system_program,
             jump_program,
@@ -113,321 +151,300 @@ impl Window {
             shader_version,
             font_cache,
             ui_font,
+            title_font,
             text_nodes: Vec::new(),
         };
 
+        let graphics_context = GraphicsContext {
+            display,
+            ui_font,
+            title_font,
+        };
+
         let user_state = UserState {
-            window_size: math::v2(width, height),
-            mouse_down: None,
-            mouse_position: math::v2(0.0, 0.0),
-            map_offset: math::v2(0.0, 0.0),
-            zoom: 1.0,
-            closed: false,
+            query_string: String::new(),
+            selected_system: None,
         };
 
         Window {
             event_loop,
+            graphics_context,
             graphics_state,
             user_state,
         }
     }
 
-    pub fn run(self, systems: crate::SystemCollection, jumps: Vec<crate::DrawJump>) -> ! {
-        let mut user_state = self.user_state;
+    pub fn run(self) -> ! {
+        let mut runtime = tokio::runtime::Builder::new()
+            .threaded_scheduler()
+            .enable_all()
+            .build()
+            .unwrap();
         let mut graphics_state = self.graphics_state;
+
+        let event_proxy = self.event_loop.create_proxy();
+
+        let mut world = World::new(event_proxy.clone());
+        runtime.block_on(async {
+            let profile = crate::oauth::load_or_authorize().await.unwrap();
+            let client = crate::esi::Client::new(profile);
+            world.load(&client).await.unwrap();
+        });
+
+        let mut user_state = self.user_state;
+        let graphics_context = unsafe {
+            std::mem::transmute::<&GraphicsContext, &'static GraphicsContext>(
+                &self.graphics_context,
+            )
+        };
+
+        let mut input_state = InputState::new(event_proxy);
+        let mut map = Map::new(&graphics_context);
+        let mut frame_time = Instant::now();
+
         self.event_loop.run(move |event, _window, control_flow| {
-            *control_flow = ControlFlow::Wait;
             use glutin::event::*;
             match event {
-                Event::RedrawRequested(_window) => {
-                    Window::draw(&mut graphics_state, &user_state, &systems, &jumps);
+                Event::NewEvents(StartCause::Poll)
+                | Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
+                    graphics_context.request_redraw()
                 }
-                event => {
-                    let event_result = Window::event(event, &mut user_state);
-                    match event_result {
-                        EventResult::Redraw => {
-                            graphics_state.display.gl_window().window().request_redraw()
-                        }
-                        EventResult::Close => *control_flow = ControlFlow::Exit,
-                        EventResult::Nothing => (),
+                Event::MainEventsCleared => {
+                    let dt = frame_time.elapsed();
+
+                    Window::update(
+                        dt,
+                        &input_state,
+                        &mut world,
+                        graphics_context,
+                        &mut user_state,
+                    );
+                    map.update(dt, &input_state, &world);
+
+                    frame_time = Instant::now();
+
+                    *control_flow = if input_state.closed() {
+                        ControlFlow::Exit
+                    } else {
+                        ControlFlow::Wait
+                    };
+
+                    input_state.reset();
+                }
+                Event::RedrawRequested(..) => {
+                    Window::update_shaders(graphics_context, &mut graphics_state);
+
+                    let mut frame = graphics_context.display.draw();
+                    frame.clear_color(0.0 / 255.0, 0.0 / 255.0, 0.0 / 255.0, 1.0);
+                    frame.clear_depth(0.0);
+
+                    map.draw(&graphics_state, &mut frame);
+                    Window::draw(
+                        &mut frame,
+                        &graphics_context,
+                        &mut graphics_state,
+                        &mut user_state,
+                        &input_state,
+                        &mut world,
+                    );
+
+                    if let Err(e) = frame.finish() {
+                        log::error!("gl swap buffer error: {:?}", e);
                     }
                 }
+                Event::RedrawEventsCleared => {}
+                event => input_state.process(event),
             }
-        });
+        })
     }
 
-    fn event(event: glutin::event::Event<UserEvent>, user_state: &mut UserState) -> EventResult {
-        use glutin::event::*;
-        match event {
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                user_state.closed = true;
-                EventResult::Close
-            }
-            Event::WindowEvent {
-                event: WindowEvent::MouseWheel { delta, .. },
-                ..
-            } => {
-                let delta = match delta {
-                    MouseScrollDelta::LineDelta(_x, y) => y * 5.0,
-                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
-                };
-
-                if delta != 0.0 {
-                    user_state.zoom += (-delta * user_state.zoom) / 20.0;
-
-                    if user_state.zoom <= 0.25 {
-                        user_state.zoom = 0.25;
-                    }
-                    EventResult::Redraw
-                } else {
-                    EventResult::Nothing
-                }
-            }
-            Event::WindowEvent {
-                event:
-                    WindowEvent::MouseInput {
-                        state,
-                        button: MouseButton::Left,
-                        ..
-                    },
-                ..
-            } => {
-                match state {
-                    ElementState::Pressed => {
-                        user_state.mouse_down = Some(user_state.mouse_position)
-                    }
-                    ElementState::Released => {
-                        if let Some(offset) = user_state.mouse_down {
-                            user_state.map_offset = ((offset - user_state.mouse_position)
-                                / user_state.zoom)
-                                + user_state.map_offset;
-                        }
-                        user_state.mouse_down = None;
-                    }
-                }
-                EventResult::Redraw
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CursorMoved { position, .. },
-                ..
-            } => {
-                let position = math::v2(position.x, position.y).as_f32();
-                let window_size = user_state.window_size.as_f32();
-
-                let mouse_position = position / window_size * 2.0 - 1.0;
-
-                user_state.mouse_position = mouse_position;
-                EventResult::Redraw
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Resized(size),
-                ..
-            } => {
-                user_state.window_size = math::v2(size.width, size.height);
-                EventResult::Redraw
-            }
-            _ => EventResult::Nothing,
-        }
-    }
-
-    fn draw(
-        graphics_state: &mut GraphicsState,
-        user_state: &UserState,
-        systems: &crate::SystemCollection,
-        jumps: &[crate::DrawJump],
+    fn update(
+        dt: Duration,
+        input_state: &InputState,
+        world: &mut World,
+        graphics_context: &GraphicsContext,
+        user_state: &mut UserState,
     ) {
-        Window::update_shaders(graphics_state);
-
-        let mut frame = graphics_state.display.draw();
-        frame.clear_color(1.0 / 255.0, 1.5 / 255.0, 2.0 / 255.0, 1.0);
-
-        let mut max_mag = 0.0;
-        let system_data: Vec<_> = systems
-            .iter()
-            .filter(|s| s.system_id < 30050000)
-            .map(|s| {
-                let mut pos: math::V3<f64> = (&s.position).into();
-                let t = pos.y;
-                pos.y = pos.z;
-                pos.z = t;
-
-                let mag = pos.magnitude() as f32;
-                if mag > max_mag {
-                    max_mag = mag;
+        for event in input_state.user_events() {
+            match event {
+                UserEvent::MapEvent(MapEvent::SelectedSystemChanged(system)) => {
+                    user_state.selected_system = system.clone();
+                    graphics_context.request_redraw();
                 }
-                let color = sec_status_color(s.security_status);
-
-                SystemData {
-                    center: pos.contract().as_f32(),
-                    color,
-                }
-            })
-            .collect();
-
-        let mut jump_data = Vec::with_capacity(jumps.len() * 6);
-        for j in jumps {
-            push_line_segment(j, &mut jump_data);
+                _ => (),
+            }
         }
 
-        let zoom = user_state.zoom;
+        if input_state.text().len() > 0 {
+            user_state.query_string.push_str(input_state.text());
+            graphics_context.request_redraw();
+        }
 
-        let map_offset = user_state.map_offset;
-        let offset = if let Some(offset) = user_state.mouse_down {
-            ((offset - user_state.mouse_position) / zoom) + map_offset
-        } else {
-            map_offset
-        };
+        if input_state.was_key_down(VirtualKeyCode::Return) {
+            let parts: Vec<_> = user_state.query_string.split(' ').collect();
 
-        let mut map_view_matrix = math::M3::<f32>::identity();
-        map_view_matrix.c0.x = zoom / max_mag;
-        map_view_matrix.c1.y = zoom / max_mag;
-        map_view_matrix.c2.x = -offset.x * zoom;
-        map_view_matrix.c2.y = offset.y * zoom;
+            if user_state.query_string.len() == 0 {
+                input_state.send_user_event(UserEvent::QueryEvent(QueryEvent::SystemsFocused(
+                    HashSet::new(),
+                )))
+            } else if parts.len() == 2 {
+                let from = world.match_system(parts[0]).into_iter().next();
+                let to = world.match_system(parts[1]).into_iter().next();
 
-        let window_size = user_state.window_size.as_f32();
-
-        let window_scale = if window_size.x > window_size.y {
-            math::v2(window_size.x / window_size.y, 1.0)
-        } else if window_size.y > window_size.x {
-            math::v2(1.0, window_size.y / window_size.x)
-        } else {
-            math::v2(1.0, 1.0)
-        };
-
-        let mut map_scale_matrix = math::M3::<f32>::identity();
-        map_scale_matrix.c0.x = 1.0 / window_scale.x;
-        map_scale_matrix.c1.y = 1.0 / window_scale.y;
-
-        let font_atlas_sampler = graphics_state
-            .font_cache
-            .texture()
-            .sampled()
-            .magnify_filter(glium::uniforms::MagnifySamplerFilter::Nearest)
-            .minify_filter(glium::uniforms::MinifySamplerFilter::Nearest);
-
-        let uniforms = glium::uniform! {
-            map_scale_matrix: map_scale_matrix,
-            map_view_matrix: map_view_matrix,
-            zoom: zoom,
-            window_size: window_size,
-            font_atlas: font_atlas_sampler
-        };
-
-        let draw_params = glium::DrawParameters {
-            blend: glium::Blend {
-                color: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::SourceAlpha,
-                    destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
-                },
-                alpha: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::Zero,
-                    destination: glium::LinearBlendingFactor::One,
-                },
-                constant_value: (1.0, 1.0, 1.0, 1.0),
-            },
-            ..Default::default()
-        };
-
-        let system_data_buf =
-            glium::VertexBuffer::new(&graphics_state.display, &system_data).unwrap();
-
-        let jump_data_buf = glium::VertexBuffer::new(&graphics_state.display, &jump_data).unwrap();
-
-        frame
-            .draw(
-                &jump_data_buf,
-                &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                &graphics_state.jump_program,
-                &uniforms,
-                &draw_params,
-            )
-            .unwrap();
-
-        frame
-            .draw(
-                (
-                    &graphics_state.circle_model,
-                    system_data_buf.per_instance().unwrap(),
-                ),
-                &glium::index::NoIndices(glium::index::PrimitiveType::TriangleFan),
-                &graphics_state.system_program,
-                &uniforms,
-                &draw_params,
-            )
-            .unwrap();
-
-        if zoom > 15.0 {
-            let alpha = ((zoom - 15.0) / (25.0 - 15.0)).min(1.0);
-
-            let mut text_view_matrix = math::M3::<f32>::identity();
-            text_view_matrix.c0.x = zoom / max_mag;
-            text_view_matrix.c1.y = zoom / max_mag;
-            text_view_matrix.c2.x = -offset.x * zoom;
-            text_view_matrix.c2.y = offset.y * zoom;
-
-            let mut text_scale_matrix = math::M3::<f32>::identity();
-            text_scale_matrix.c0.x = 1.0 / window_scale.x;
-            text_scale_matrix.c1.y = 1.0 / window_scale.y;
-
-            let mut text_screen_matrix = math::M3::<f32>::identity();
-            text_screen_matrix.c0.x = window_size.x / 2.0;
-            text_screen_matrix.c1.y = -window_size.y / 2.0;
-            text_screen_matrix.c2.x = window_size.x / 2.0;
-            text_screen_matrix.c2.y = window_size.y / 2.0;
-
-            let text_transform = text_screen_matrix * text_scale_matrix * text_view_matrix;
-
-            for system in systems.iter().filter(|s| s.system_id < 30050000) {
-                let pos: math::V3<f64> = (&system.position).into();
-                let pos = math::v2(pos.x, pos.z).as_f32();
-
-                let pos = (text_transform * pos.expand(1.0)).collapse();
-
-                let min_corner = pos - 50.0;
-                let max_corner = pos + 50.0;
-
-                if max_corner.x < 0.0
-                    || max_corner.y < 0.0
-                    || min_corner.x > window_size.x
-                    || min_corner.y > window_size.y
-                {
-                    continue;
+                match (from, to) {
+                    (Some(from), Some(to)) => {
+                        world.create_route(from, to);
+                        input_state.send_user_event(UserEvent::QueryEvent(QueryEvent::RouteChanged))
+                    }
+                    _ => (),
                 }
+            } else if parts.len() == 1 {
+                let focus_systems = world.match_system(parts[0]).into_iter().collect();
+                input_state.send_user_event(UserEvent::QueryEvent(QueryEvent::SystemsFocused(
+                    focus_systems,
+                )))
+            }
+            user_state.query_string = String::new();
+            graphics_context.request_redraw();
+        }
 
-                let color = if system.name == "Jita" {
-                    sec_status_color(system.security_status)
-                } else {
-                    math::V3::fill(0.6)
-                };
+        if input_state.was_key_down(VirtualKeyCode::Back) {
+            user_state.query_string.pop();
+            graphics_context.request_redraw();
+        }
+    }
 
-                let pos = pos + math::V2::fill(0.5 * zoom);
+    fn draw<S: Surface>(
+        frame: &mut S,
+        graphics_context: &GraphicsContext,
+        graphics_state: &mut GraphicsState,
+        user_state: &mut UserState,
+        input_state: &InputState,
+        world: &mut World,
+    ) {
+        let player_location = world.location();
+        let window_size = input_state.window_size.as_f32();
 
+        let mut stats_strings = Vec::new();
+        for system in world.iter() {
+            if Some(system.system_id) == user_state.selected_system {
+                let stats = world.stats(system.system_id);
+                stats_strings.push(format!("{} ({:.2})", system.name, system.security_status));
+
+                if let Some(stats) = stats {
+                    stats_strings.push(format!(
+                        "Ship Kills: {} Pod Kills: {}",
+                        stats.ship_kills, stats.pod_kills
+                    ));
+                    stats_strings.push(format!(
+                        "Jumps: {} NPC Kills: {}",
+                        stats.jumps, stats.npc_kills
+                    ));
+                }
+            }
+        }
+
+        let mut line_height = 10.0;
+        let mut first = true;
+        let mut player_on_route = if let Some(location) = player_location {
+            world.route_text().iter().any(|s| s.0 == location)
+        } else {
+            false
+        };
+        for (system, line) in world.route_text() {
+            let height = if first { 40.0 } else { 25.0 };
+            let color = if first {
+                math::V4::fill(1.0)
+            } else if Some(*system) == player_location {
+                player_on_route = false;
+                math::v4(0.0, 1.0, 1.0, 1.0)
+            } else if player_on_route {
+                math::v4(0.4, 0.4, 0.4, 1.0)
+            } else {
+                math::V4::fill(1.0)
+            };
+            let node = TextNode {
+                text: line.clone(),
+                font: graphics_state.ui_font,
+                scale: height,
+                position: math::v2(5.0, line_height),
+                anchor: font::TextAnchor::TopLeft,
+                color,
+                shadow: true,
+            };
+            line_height += height;
+            first = false;
+            graphics_state.text_nodes.push(node);
+        }
+
+        if stats_strings.len() > 0 {
+            let mut line_height = 10.0;
+            let mut first = true;
+            for line in stats_strings {
+                let height = if first { 40.0 } else { 25.0 };
                 let node = TextNode {
-                    text: system.name.to_string(),
+                    text: line,
                     font: graphics_state.ui_font,
-                    scale: 25.0,
-                    position: pos,
-                    color: color.expand(alpha),
+                    scale: height,
+                    position: math::v2(window_size.x - 5.0, line_height),
+                    anchor: font::TextAnchor::TopRight,
+                    color: math::v4(1.0, 1.0, 1.0, 1.0),
+                    shadow: true,
                 };
-
+                line_height += height;
+                first = false;
                 graphics_state.text_nodes.push(node);
             }
         }
 
-        let node = TextNode {
-            text: "Hello World".to_string(),
-            font: graphics_state.ui_font,
-            scale: 130.0,
-            position: math::v2(480.0, 20.0),
-            color: math::V4::fill(1.0),
-        };
+        if user_state.query_string.len() > 0 {
+            let node = TextNode {
+                text: user_state.query_string.clone(),
+                font: graphics_state.ui_font,
+                scale: 30.0,
+                position: math::v2(5.0, window_size.y - 30.0),
+                anchor: font::TextAnchor::TopLeft,
+                color: math::V4::fill(1.0),
+                shadow: true,
+            };
 
-        graphics_state.text_nodes.push(node);
+            graphics_state.text_nodes.push(node);
+        }
 
         if graphics_state.text_nodes.len() > 0 {
+            let font_atlas_sampler = graphics_state
+                .font_cache
+                .texture()
+                .sampled()
+                .magnify_filter(glium::uniforms::MagnifySamplerFilter::Nearest)
+                .minify_filter(glium::uniforms::MinifySamplerFilter::Nearest);
+
+            let uniforms = glium::uniform! {
+                window_size: window_size,
+                font_atlas: font_atlas_sampler
+            };
+
+            let draw_params = glium::DrawParameters {
+                blend: glium::Blend {
+                    color: glium::BlendingFunction::Addition {
+                        source: glium::LinearBlendingFactor::SourceAlpha,
+                        destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
+                    },
+                    alpha: glium::BlendingFunction::Addition {
+                        source: glium::LinearBlendingFactor::Zero,
+                        destination: glium::LinearBlendingFactor::One,
+                    },
+                    constant_value: (1.0, 1.0, 1.0, 1.0),
+                },
+                viewport: Some(glium::Rect {
+                    left: 0,
+                    bottom: 0,
+                    width: window_size.x as u32,
+                    height: window_size.y as u32,
+                }),
+                ..Default::default()
+            };
+
             let mut text_buf = Vec::new();
             for text in graphics_state.text_nodes.drain(..) {
                 graphics_state
@@ -437,15 +454,17 @@ impl Window {
                         text.text.as_str(),
                         &mut text_buf,
                         text.scale,
+                        text.anchor,
                         text.position,
                         text.color,
                         window_size,
+                        text.shadow,
                     )
                     .unwrap();
             }
 
             let text_data_buf =
-                glium::VertexBuffer::new(&graphics_state.display, &text_buf).unwrap();
+                glium::VertexBuffer::new(&graphics_context.display, &text_buf).unwrap();
             frame
                 .draw(
                     &text_data_buf,
@@ -456,11 +475,9 @@ impl Window {
                 )
                 .unwrap();
         }
-
-        frame.finish().unwrap();
     }
 
-    fn update_shaders(graphics_state: &mut GraphicsState) {
+    fn update_shaders(graphics_context: &GraphicsContext, graphics_state: &mut GraphicsState) {
         let new_version = graphics_state.shader_collection.version();
         if new_version != graphics_state.shader_version {
             let systems_vert = graphics_state
@@ -479,21 +496,25 @@ impl Window {
             let text_frag = graphics_state.shader_collection.get("text_frag").unwrap();
 
             let systems_program = glium::Program::from_source(
-                &graphics_state.display,
+                &graphics_context.display,
                 &systems_vert,
                 &systems_frag,
                 None,
             );
 
             let jumps_program = glium::Program::from_source(
-                &graphics_state.display,
+                &graphics_context.display,
                 &jumps_vert,
                 &jumps_frag,
                 None,
             );
 
-            let text_program =
-                glium::Program::from_source(&graphics_state.display, &text_vert, &text_frag, None);
+            let text_program = glium::Program::from_source(
+                &graphics_context.display,
+                &text_vert,
+                &text_frag,
+                None,
+            );
 
             match systems_program {
                 Ok(program) => graphics_state.system_program = program,
@@ -517,6 +538,36 @@ impl Window {
     }
 }
 
+fn sec_status_color(sec: f64) -> math::V3<f32> {
+    let sec_status = sec.max(0.0).min(1.0) as f32;
+    let blue = if sec_status >= 0.9 { 1.0 } else { 0.0 };
+    math::v3(1.0 - sec_status, sec_status, blue)
+}
+
+fn standing_color(standing: f64) -> math::V3<f32> {
+    if standing == 0.0 {
+        math::v3(0.5, 0.5, 0.5)
+    } else if standing > 0.5 {
+        math::v3(0.0, 0.0, 1.0)
+    } else if standing > 0.0 {
+        math::v3(0.25, 0.5, 1.0)
+    } else if standing < -0.5 {
+        math::v3(1.0, 0.0, 0.0)
+    } else {
+        math::v3(1.0, 0.5, 0.25)
+    }
+}
+
+fn jump_type_color(jump: &JumpType) -> math::V3<f32> {
+    match jump {
+        JumpType::System => math::v3(0.0, 0.0, 1.0),
+        JumpType::Region => math::v3(0.1, 0.0, 0.15),
+        JumpType::Constellation => math::v3(0.2, 0.0, 0.0),
+        JumpType::JumpGate => math::v3(0.0, 0.2, 0.0),
+        JumpType::Wormhole => math::v3(0.1, 0.15, 0.0),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CircleVertex {
     position: math::V2<f32>,
@@ -525,7 +576,7 @@ glium::implement_vertex!(CircleVertex, position);
 
 #[derive(Clone, Copy, Debug)]
 struct LineVertex {
-    position: math::V2<f32>,
+    position: math::V3<f32>,
     normal: math::V2<f32>,
     color: math::V3<f32>,
 }
@@ -533,76 +584,14 @@ glium::implement_vertex!(LineVertex, position, normal, color);
 
 #[derive(Clone, Copy, Debug)]
 struct SystemData {
-    color: math::V3<f32>,
+    color: math::V4<f32>,
+    highlight: math::V4<f32>,
     center: math::V2<f32>,
+    system_id: i32,
+    scale: f32,
+    radius: f32,
 }
-glium::implement_vertex!(SystemData, color, center);
-
-fn sec_status_color(sec: f64) -> math::V3<f32> {
-    let sec_status = sec.max(0.0).min(1.0) as f32;
-    let blue = if sec_status >= 0.9 { 1.0 } else { 0.0 };
-    math::v3(1.0 - sec_status, sec_status, blue)
-}
-
-fn jump_type_color(jump: &super::JumpType) -> math::V3<f32> {
-    use super::JumpType;
-    match jump {
-        JumpType::System => math::v3(0.0, 0.0, 1.0),
-        JumpType::Constellation => math::v3(0.4, 0.0, 0.65),
-        JumpType::Region => math::v3(0.4, 0.0, 0.65),
-    }
-}
-
-fn push_line_segment(jump: &super::DrawJump, buffer: &mut Vec<LineVertex>) {
-    let (left_color, right_color) =
-        match (jump.jump_type, jump.on_route, jump.left_sec, jump.right_sec) {
-            (_, true, left, right) => (sec_status_color(left), sec_status_color(right)),
-            (jump, false, _, _) => (jump_type_color(&jump), jump_type_color(&jump)),
-        };
-
-    let jump_left = math::v2(jump.left.x, jump.left.z).as_f32();
-    let jump_right = math::v2(jump.right.x, jump.right.z).as_f32();
-
-    let left_norm = math::v2(-(jump_left.y - jump_right.y), jump_left.x - jump_right.x).normalize();
-    let right_norm =
-        math::v2(jump_left.y - jump_right.y, -(jump_left.x - jump_right.x)).normalize();
-
-    buffer.push(LineVertex {
-        position: jump_left,
-        color: left_color,
-        normal: left_norm,
-    });
-
-    buffer.push(LineVertex {
-        position: jump_right,
-        color: right_color,
-        normal: right_norm,
-    });
-
-    buffer.push(LineVertex {
-        position: jump_left,
-        color: left_color,
-        normal: right_norm,
-    });
-
-    buffer.push(LineVertex {
-        position: jump_right,
-        color: right_color,
-        normal: right_norm,
-    });
-
-    buffer.push(LineVertex {
-        position: jump_right,
-        color: right_color,
-        normal: left_norm,
-    });
-
-    buffer.push(LineVertex {
-        position: jump_left,
-        color: left_color,
-        normal: left_norm,
-    });
-}
+glium::implement_vertex!(SystemData, color, highlight, center, scale, radius);
 
 unsafe impl glium::vertex::Attribute for math::V2<f32> {
     fn get_type() -> glium::vertex::AttributeType {
@@ -671,4 +660,180 @@ impl glium::uniforms::AsUniformValue for math::M4<f32> {
             [self.c3.x, self.c3.y, self.c3.z, self.c3.w],
         ])
     }
+}
+
+struct InputState {
+    event_proxy: EventLoopProxy<UserEvent>,
+    closed: bool,
+    text: String,
+    pressed_keys: HashSet<glutin::event::VirtualKeyCode>,
+    released_keys: HashSet<glutin::event::VirtualKeyCode>,
+    mouse_wheel_delta: f32,
+    window_size: math::V2<u32>,
+    window_start_size: math::V2<u32>,
+    mouse_position: math::V2<f32>,
+    mouse_start_position: math::V2<f32>,
+    pressed_mouse: HashSet<glutin::event::MouseButton>,
+    released_mouse: HashSet<glutin::event::MouseButton>,
+    user_events: Vec<UserEvent>,
+}
+
+impl InputState {
+    pub fn new(event_proxy: EventLoopProxy<UserEvent>) -> InputState {
+        InputState {
+            event_proxy,
+            closed: false,
+            text: String::new(),
+            pressed_keys: HashSet::new(),
+            released_keys: HashSet::new(),
+            mouse_wheel_delta: 0.0,
+            window_size: math::V2::fill(1024),
+            window_start_size: math::V2::fill(1024),
+            mouse_position: math::V2::fill(0.0),
+            mouse_start_position: math::V2::fill(0.0),
+            pressed_mouse: HashSet::new(),
+            released_mouse: HashSet::new(),
+            user_events: Vec::new(),
+        }
+    }
+
+    pub fn send_user_event(&self, event: UserEvent) {
+        let event_err = self.event_proxy.send_event(event);
+        match event_err {
+            Err(error) => log::error!("error sending user event: {:?}", error),
+            _ => (),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.mouse_start_position = self.mouse_position;
+        self.mouse_wheel_delta = 0.0;
+        self.window_start_size = self.window_size;
+        self.released_keys.clear();
+        self.released_mouse.clear();
+        self.text.clear();
+        self.user_events.clear();
+    }
+
+    pub fn process(&mut self, event: Event<UserEvent>) {
+        use glutin::event::*;
+        match event {
+            Event::UserEvent(user_event) => self.user_events.push(user_event),
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                self.closed = true;
+            }
+            Event::WindowEvent {
+                event: WindowEvent::ReceivedCharacter(c),
+                ..
+            } => {
+                if !c.is_control() {
+                    self.text.push(c);
+                }
+            }
+            Event::WindowEvent {
+                event:
+                    WindowEvent::KeyboardInput {
+                        input:
+                            KeyboardInput {
+                                state,
+                                virtual_keycode: Some(key),
+                                ..
+                            },
+                        ..
+                    },
+                ..
+            } => match state {
+                ElementState::Pressed => {
+                    self.released_keys.remove(&key);
+                    self.pressed_keys.insert(key);
+                }
+                ElementState::Released => {
+                    self.pressed_keys.remove(&key);
+                    self.released_keys.insert(key);
+                }
+            },
+            Event::WindowEvent {
+                event: WindowEvent::MouseWheel { delta, .. },
+                ..
+            } => {
+                let delta = match delta {
+                    MouseScrollDelta::LineDelta(_x, y) => y * 5.0,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32,
+                };
+
+                self.mouse_wheel_delta += delta;
+            }
+            Event::WindowEvent {
+                event: WindowEvent::MouseInput { state, button, .. },
+                ..
+            } => match state {
+                ElementState::Pressed => {
+                    self.released_mouse.remove(&button);
+                    self.pressed_mouse.insert(button);
+                }
+                ElementState::Released => {
+                    self.pressed_mouse.remove(&button);
+                    self.released_mouse.insert(button);
+                }
+            },
+            Event::WindowEvent {
+                event: WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
+                let position = math::v2(position.x, position.y).as_f32();
+                self.mouse_position = position;
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Resized(size),
+                ..
+            } => {
+                self.window_size = math::v2(size.width, size.height);
+            }
+            _ => (),
+        }
+    }
+
+    pub fn window_resized(&self) -> Option<math::V2<u32>> {
+        if self.window_start_size != self.window_size {
+            Some(self.window_size)
+        } else {
+            None
+        }
+    }
+
+    pub fn scroll(&self) -> f32 {
+        self.mouse_wheel_delta
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn was_key_down(&self, key: VirtualKeyCode) -> bool {
+        self.released_keys.contains(&key)
+    }
+
+    pub fn user_events(&self) -> impl Iterator<Item = &UserEvent> {
+        self.user_events.iter()
+    }
+
+    pub fn closed(&self) -> bool {
+        self.closed
+    }
+
+    pub fn mouse_move_delta(&self) -> math::V2<f32> {
+        self.mouse_start_position - self.mouse_position
+    }
+
+    pub fn is_mouse_down(&self, button: MouseButton) -> bool {
+        self.pressed_mouse.contains(&button)
+    }
+}
+
+trait Widget {
+    fn update(&mut self, dt: Duration, input_state: &InputState, world: &World);
+    fn draw<S: glium::Surface>(&mut self, graphics_state: &GraphicsState, frame: &mut S);
 }
