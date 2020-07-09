@@ -201,6 +201,8 @@ impl Window {
         let mut input_state = InputState::new(event_proxy);
         let mut map = Map::new(&graphics_context);
         let mut frame_time = Instant::now();
+        let mut render_time = Instant::now();
+        let mut frame_count = 0;
 
         self.event_loop.run(move |event, _window, control_flow| {
             use glutin::event::*;
@@ -250,6 +252,12 @@ impl Window {
 
                     if let Err(e) = frame.finish() {
                         log::error!("gl swap buffer error: {:?}", e);
+                    }
+
+                    frame_count += 1;
+                    if render_time.elapsed().as_millis() > 1000 {
+                        render_time = Instant::now();
+                        frame_count = 0;
                     }
                 }
                 Event::RedrawEventsCleared => {}
@@ -326,7 +334,7 @@ impl Window {
         let window_size = input_state.window_size.as_f32();
 
         let mut stats_strings = Vec::new();
-        for system in world.iter() {
+        for system in world.systems() {
             if Some(system.system_id) == user_state.selected_system {
                 let stats = world.stats(system.system_id);
                 stats_strings.push(format!("{} ({:.2})", system.name, system.security_status));

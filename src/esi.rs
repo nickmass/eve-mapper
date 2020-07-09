@@ -4,10 +4,9 @@ use tokio::sync::RwLock;
 
 use std::sync::Arc;
 
-use super::math;
 use super::oauth::{self, Profile};
 
-pub const ALWAYS_CACHE: bool = true;
+pub const ALWAYS_CACHE: bool = false;
 
 #[derive(Copy, Clone, Debug)]
 enum EsiEndpoint {
@@ -326,7 +325,7 @@ impl Client {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetUniverseSystem {
     pub system_id: i32,
     pub name: String,
@@ -336,7 +335,7 @@ pub struct GetUniverseSystem {
     pub stargates: Option<Vec<i32>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetUniverseStargate {
     pub stargate_id: i32,
     pub name: String,
@@ -345,20 +344,20 @@ pub struct GetUniverseStargate {
     pub system_id: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetUniverseStargateDestination {
     pub stargate_id: i32,
     pub system_id: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Position {
     pub x: f64,
     pub y: f64,
     pub z: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetUniverseRegion {
     pub region_id: i32,
     pub name: String,
@@ -366,7 +365,7 @@ pub struct GetUniverseRegion {
     pub constellations: Option<Vec<i32>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetUniverseConstellation {
     pub constellation_id: i32,
     pub name: String,
@@ -375,7 +374,7 @@ pub struct GetUniverseConstellation {
     pub systems: Option<Vec<i32>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetUniverseSystemKills {
     pub npc_kills: i32,
     pub pod_kills: i32,
@@ -383,34 +382,34 @@ pub struct GetUniverseSystemKills {
     pub system_id: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetUniverseSystemJumps {
     pub ship_jumps: i32,
     pub system_id: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetCharacterLocation {
     pub solar_system_id: i32,
     pub station_id: Option<i64>,
     pub structure_id: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetAllianceContacts {
     pub contact_id: i32,
     pub contact_type: String,
     pub standing: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetCorporationContacts {
     pub contact_id: i32,
     pub contact_type: String,
     pub standing: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetCharacterContacts {
     pub contact_id: i32,
     pub contact_type: String,
@@ -419,7 +418,7 @@ pub struct GetCharacterContacts {
     pub standing: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetCharacter {
     pub alliance_id: Option<i32>,
     pub ancestry_id: Option<i32>,
@@ -434,20 +433,20 @@ pub struct GetCharacter {
     pub security_status: Option<f64>,
     pub title: Option<String>,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetCorporation {
     pub alliance_id: Option<i32>,
     pub name: String,
     pub ticker: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetAlliance {
     pub name: String,
     pub ticker: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct GetSovereigntyMap {
     pub system_id: i32,
     pub alliance_id: Option<i32>,

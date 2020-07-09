@@ -243,7 +243,7 @@ impl<'a> Widget for Map<'a> {
 
         if self.map_systems.is_none() {
             let max_magnitude = world
-                .iter()
+                .systems()
                 .filter(|s| s.system_id < 30050000)
                 .map(|s| math::v3(s.position.x, s.position.z, s.position.y).magnitude())
                 .max_by(|a, b| {
@@ -256,7 +256,7 @@ impl<'a> Widget for Map<'a> {
                 .unwrap_or(1.0);
 
             let map_systems = world
-                .iter()
+                .systems()
                 .filter(|s| s.system_id < 30050000)
                 .map(|s| {
                     let position = math::v2(s.position.x, s.position.z);
@@ -338,11 +338,11 @@ impl<'a> Widget for Map<'a> {
                 };
 
                 self.region_names.clear();
-                for region in world.regions.values() {
+                for region in world.regions() {
                     if let Some(constellations) = region.constellations.as_ref() {
                         let (positions, count) = constellations
                             .iter()
-                            .filter_map(|c| world.constellations.get(c))
+                            .filter_map(|c| world.constellation(*c))
                             .map(|constellation| {
                                 let position =
                                     math::v2(constellation.position.x, constellation.position.z);
