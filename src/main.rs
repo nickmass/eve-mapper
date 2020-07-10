@@ -1,3 +1,4 @@
+mod cache;
 pub(crate) mod error;
 mod esi;
 mod font;

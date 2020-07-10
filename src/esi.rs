@@ -1,9 +1,10 @@
 use reqwest::Url;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use std::sync::Arc;
 
+use super::cache::{Cache, CacheError, CacheKind};
 use super::oauth::{self, Profile};
 
 pub const ALWAYS_CACHE: bool = false;
@@ -26,6 +27,7 @@ pub struct Client {
     endpoint: EsiEndpoint,
     client: reqwest::Client,
     profile: Arc<RwLock<Profile>>,
+    cache: Arc<Cache>,
 }
 
 #[derive(Debug)]
@@ -43,50 +45,60 @@ pub enum Error {
 }
 
 impl Client {
-    pub fn new(profile: Profile) -> Client {
+    pub async fn new(profile: Profile) -> Client {
+        let cache = Arc::new(
+            Cache::new("eve-static.dat", "eve-dynamic.dat")
+                .await
+                .unwrap(),
+        );
+
+        let inner_cache = cache.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::time::delay_for(std::time::Duration::from_secs(30)).await;
+                let save_res = inner_cache.save().await;
+                match save_res {
+                    Err(error) => log::error!("cache save error: {:?}", error),
+                    _ => (),
+                }
+            }
+        });
         Client {
             endpoint: EsiEndpoint::Latest,
             client: reqwest::Client::new(),
             profile: Arc::new(RwLock::new(profile)),
+            cache,
         }
     }
 
-    async fn get<S: AsRef<str>, T: serde::de::DeserializeOwned>(
+    async fn get<S: AsRef<str>, T: serde::de::DeserializeOwned + serde::Serialize>(
         &self,
         path: S,
     ) -> Result<T, Error> {
-        self.execute_get(path, false, true).await
+        self.execute_get(path, false, CacheKind::Static).await
     }
 
-    async fn get_no_cache<S: AsRef<str>, T: serde::de::DeserializeOwned>(
+    async fn get_no_cache<S: AsRef<str>, T: serde::de::DeserializeOwned + serde::Serialize>(
         &self,
         path: S,
     ) -> Result<T, Error> {
-        self.execute_get(path, false, false).await
+        self.execute_get(path, false, CacheKind::Dynamic).await
     }
 
-    async fn get_auth<S: AsRef<str>, T: serde::de::DeserializeOwned>(
+    async fn get_auth_no_cache<S: AsRef<str>, T: serde::de::DeserializeOwned + serde::Serialize>(
         &self,
         path: S,
     ) -> Result<T, Error> {
-        self.execute_get(path, true, true).await
+        self.execute_get(path, true, CacheKind::Dynamic).await
     }
 
-    async fn get_auth_no_cache<S: AsRef<str>, T: serde::de::DeserializeOwned>(
-        &self,
-        path: S,
-    ) -> Result<T, Error> {
-        self.execute_get(path, true, false).await
-    }
-
-    async fn execute_get<S: AsRef<str>, T: serde::de::DeserializeOwned>(
+    async fn execute_get<S: AsRef<str>, T: serde::de::DeserializeOwned + serde::Serialize>(
         &self,
         path: S,
         auth: bool,
-        cache: bool,
+        cache_kind: CacheKind,
     ) -> Result<T, Error> {
-        let cache = ALWAYS_CACHE || cache;
-
         let uuid = uuid::Uuid::new_v4();
         let path = path.as_ref();
         let url = self
@@ -94,15 +106,13 @@ impl Client {
             .as_url_base()
             .join(path)
             .map_err(|e| Error::InvalidUrlPath(path.to_string(), e.into()))?;
-        log::info!("esi request {}: {}", uuid, url);
 
         use sha2::Digest;
         let path_hash = format!("{:x}", sha2::Sha256::digest(url.as_str().as_bytes()));
-        let path = std::path::PathBuf::from(format!("local-cache/{}", path_hash));
 
-        let mut request = self.client.get(url).header(
+        let mut request = self.client.get(url.clone()).header(
             "User-Agent",
-            "EveMapper-Development v0.0001: nickmass@nickmass.com",
+            "EveMapper-Development v0.01: nickmass@nickmass.com",
         );
 
         if auth {
@@ -112,30 +122,22 @@ impl Client {
 
         let mut request = request.build().map_err(|e| Error::InvalidRequest(e))?;
 
-        if cache {
-            if path.exists() {
-                log::info!("esi request found in cache {}", uuid);
-                match tokio::fs::read(&path).await {
-                    Ok(bytes) => match serde_json::from_slice(&bytes) {
-                        Ok(data) => return Ok(data),
-                        Err(error) => log::error!(
-                            "esi unable to deserialize from cache {}: {:?}",
-                            uuid,
-                            error
-                        ),
-                    },
-                    Err(error) => {
-                        log::error!("esi unable to read from cache {}: {:?}", uuid, error)
-                    }
-                }
+        log::debug!("looking up url in cache: {}", &url);
+        match self.cache.get(&path_hash, cache_kind).await {
+            Ok(value) => return Ok(value),
+            Err(CacheError::Expired(value)) if ALWAYS_CACHE => {
+                log::info!("returning expired data: {}", &url);
+                return Ok(value);
             }
-        }
+            Err(_) => (),
+        };
 
         let mut retry_count: u32 = 0;
 
         while retry_count < 5 {
             let this_request = request.try_clone().ok_or(Error::CannotCloneRequest)?;
             let request_start = std::time::Instant::now();
+            log::info!("esi request {}: {}", uuid, url);
             let response = self
                 .client
                 .execute(this_request)
@@ -153,6 +155,7 @@ impl Client {
             let reauth = auth && status_code == 401 || status_code == 403;
             let retry = response.status().is_server_error() || response.status().is_client_error();
             let limit = response.headers().get("X-Esi-Error-Limit-Reset");
+            let expires = response.headers().get("expires").cloned();
 
             if reauth {
                 log::info!("esi refreshing authentication token {}", uuid);
@@ -195,15 +198,33 @@ impl Client {
             }
 
             if !retry {
+                let parsed_expires = expires
+                    .as_ref()
+                    .and_then(|v| v.to_str().map(String::from).ok())
+                    .and_then(|v| httpdate::parse_http_date(&v).ok());
+
                 let bytes = response
                     .bytes()
                     .await
                     .map_err(Error::CannotRetrieveRequestBody)?;
-                if cache {
-                    log::info!("esi updating cache contents {}", uuid);
-                    tokio::fs::write(path, &bytes).await.map_err(Error::Io)?;
+                let value = serde_json::from_slice(&bytes).map_err(Error::ResponseDeserialize)?;
+
+                if let Some(expires) = parsed_expires {
+                    let cache_res = self
+                        .cache
+                        .store(&path_hash, cache_kind, &value, expires)
+                        .await;
+                    match cache_res {
+                        Err(error) => log::error!("unable to store in cache: {:?}", error),
+                        _ => (),
+                    }
+                } else {
+                    log::warn!(
+                        "Invalid or missing expires header, skipping cache: {:?}",
+                        expires
+                    );
                 }
-                return Ok(serde_json::from_slice(&bytes).map_err(Error::ResponseDeserialize)?);
+                return Ok(value);
             }
             retry_count += 1;
             log::error!(
@@ -262,7 +283,7 @@ impl Client {
 
     pub async fn get_universe_system_jumps(&self) -> Result<Vec<GetUniverseSystemJumps>, Error> {
         let url = format!("universe/system_jumps/");
-        self.get(&url).await
+        self.get_no_cache(&url).await
     }
 
     pub async fn get_universe_system_kills(&self) -> Result<Vec<GetUniverseSystemKills>, Error> {
@@ -325,7 +346,7 @@ impl Client {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetUniverseSystem {
     pub system_id: i32,
     pub name: String,
@@ -335,7 +356,7 @@ pub struct GetUniverseSystem {
     pub stargates: Option<Vec<i32>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetUniverseStargate {
     pub stargate_id: i32,
     pub name: String,
@@ -344,20 +365,20 @@ pub struct GetUniverseStargate {
     pub system_id: i32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetUniverseStargateDestination {
     pub stargate_id: i32,
     pub system_id: i32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Position {
     pub x: f64,
     pub y: f64,
     pub z: f64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetUniverseRegion {
     pub region_id: i32,
     pub name: String,
@@ -365,7 +386,7 @@ pub struct GetUniverseRegion {
     pub constellations: Option<Vec<i32>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetUniverseConstellation {
     pub constellation_id: i32,
     pub name: String,
@@ -374,7 +395,7 @@ pub struct GetUniverseConstellation {
     pub systems: Option<Vec<i32>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetUniverseSystemKills {
     pub npc_kills: i32,
     pub pod_kills: i32,
@@ -382,34 +403,34 @@ pub struct GetUniverseSystemKills {
     pub system_id: i32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetUniverseSystemJumps {
     pub ship_jumps: i32,
     pub system_id: i32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetCharacterLocation {
     pub solar_system_id: i32,
     pub station_id: Option<i64>,
     pub structure_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetAllianceContacts {
     pub contact_id: i32,
     pub contact_type: String,
     pub standing: f64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetCorporationContacts {
     pub contact_id: i32,
     pub contact_type: String,
     pub standing: f64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetCharacterContacts {
     pub contact_id: i32,
     pub contact_type: String,
@@ -418,7 +439,7 @@ pub struct GetCharacterContacts {
     pub standing: f64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetCharacter {
     pub alliance_id: Option<i32>,
     pub ancestry_id: Option<i32>,
@@ -433,20 +454,20 @@ pub struct GetCharacter {
     pub security_status: Option<f64>,
     pub title: Option<String>,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetCorporation {
     pub alliance_id: Option<i32>,
     pub name: String,
     pub ticker: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetAlliance {
     pub name: String,
     pub ticker: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetSovereigntyMap {
     pub system_id: i32,
     pub alliance_id: Option<i32>,

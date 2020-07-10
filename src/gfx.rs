@@ -187,7 +187,7 @@ impl Window {
         let mut world = World::new(event_proxy.clone());
         runtime.block_on(async {
             let profile = crate::oauth::load_or_authorize().await.unwrap();
-            let client = crate::esi::Client::new(profile);
+            let client = crate::esi::Client::new(profile).await;
             world.load(&client).await.unwrap();
         });
 

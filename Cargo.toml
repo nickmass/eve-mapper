@@ -23,4 +23,7 @@ rand = "0.7.3"
 log = "0.4.8"
 uuid = { version = "0.8.1", features = ["v4"] }
 env_logger = "0.7.1"
+futures = "0.3.5"
+flexbuffers = "0.1.1"
+httpdate = "0.3.2"
 

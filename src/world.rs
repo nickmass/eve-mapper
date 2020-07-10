@@ -1,7 +1,10 @@
+use futures::stream::futures_unordered::FuturesUnordered;
+use futures::stream::StreamExt;
 use glium::glutin::event_loop::EventLoopProxy;
 use petgraph::Graph;
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 use crate::esi;
@@ -249,6 +252,7 @@ impl World {
                 Node::System { .. } => (),
             }
         }
+        route_systems.push(to);
 
         route_text.push((0, format!("{} Jumps", jump_count)));
 
@@ -325,51 +329,55 @@ impl World {
         &self.route_text
     }
 
-    pub async fn load(&mut self, client: &esi::Client) -> Result<(), ()> {
-        let regions = client.get_universe_regions().await.unwrap();
-        let constellations = client.get_universe_constellations().await.unwrap();
-        let systems = client.get_universe_systems().await.unwrap();
-        let system_kills = client.get_universe_system_kills().await.unwrap();
-        let system_jumps = client.get_universe_system_jumps().await.unwrap();
-
-        let location_client = client.clone();
-        let inner_event_proxy = self.event_proxy.clone();
-        let inner_player_system = self.player_system.clone();
-        tokio::spawn(async move {
-            let mut counter = 0;
-            let poll_interval = 10;
-            loop {
-                if counter % 10 == 0 {
-                    let location = location_client
-                        .get_character_location()
-                        .await
-                        .ok()
-                        .map(|l| l.solar_system_id);
-                    let mut current_location = inner_player_system.lock().unwrap();
-                    if location != *current_location {
-                        *current_location = location;
-                        inner_event_proxy.send_event(UserEvent::DataEvent(
-                            DataEvent::CharacterLocationChanged(location),
-                        ));
-                    }
-                }
-                if counter % 3600 == 0 {
-                    //update kills and jumps
-                }
-                tokio::time::delay_for(std::time::Duration::from_secs(poll_interval)).await;
-                counter += poll_interval;
-            }
-        });
+    pub async fn load_sov_standings(&mut self, client: &esi::Client) {
+        use tokio::sync::RwLock;
 
         let character = client.get_character_self().await.unwrap();
-        let mut alliance_standings = HashMap::new();
-        let mut corporation_standings = HashMap::new();
 
-        if let Some(alliance_id) = character.alliance_id {
+        let alliance_standings = Arc::new(RwLock::new(HashMap::new()));
+        let corporation_standings = Arc::new(RwLock::new(HashMap::new()));
+
+        let update_alliance_standings = async {
+            if let Some(alliance_id) = character.alliance_id {
+                let mut page = 1;
+                loop {
+                    let standings = client
+                        .get_alliance_contacts(alliance_id, page)
+                        .await
+                        .unwrap();
+
+                    if standings.len() == 0 {
+                        break;
+                    }
+
+                    page += 1;
+
+                    for standing in standings {
+                        match standing.contact_type.as_str() {
+                            "corporation" => {
+                                corporation_standings
+                                    .write()
+                                    .await
+                                    .insert(standing.contact_id, standing.standing);
+                            }
+                            "alliance" => {
+                                alliance_standings
+                                    .write()
+                                    .await
+                                    .insert(standing.contact_id, standing.standing);
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+            }
+        };
+
+        let update_corporation_standings = async {
             let mut page = 1;
             loop {
                 let standings = client
-                    .get_alliance_contacts(alliance_id, page)
+                    .get_corporation_contacts(character.corporation_id, page)
                     .await
                     .unwrap();
 
@@ -382,125 +390,89 @@ impl World {
                 for standing in standings {
                     match standing.contact_type.as_str() {
                         "corporation" => {
-                            corporation_standings.insert(standing.contact_id, standing.standing);
+                            corporation_standings
+                                .write()
+                                .await
+                                .insert(standing.contact_id, standing.standing);
                         }
                         "alliance" => {
-                            alliance_standings.insert(standing.contact_id, standing.standing);
+                            alliance_standings
+                                .write()
+                                .await
+                                .insert(standing.contact_id, standing.standing);
                         }
                         _ => (),
                     }
                 }
             }
-        }
+        };
 
-        let mut page = 1;
-        loop {
-            let standings = client
-                .get_corporation_contacts(character.corporation_id, page)
-                .await
-                .unwrap();
+        let update_character_standings = async {
+            let mut page = 1;
+            loop {
+                let standings = client.get_character_contacts(page).await.unwrap();
 
-            if standings.len() == 0 {
-                break;
-            }
+                if standings.len() == 0 {
+                    break;
+                }
 
-            page += 1;
+                page += 1;
 
-            for standing in standings {
-                match standing.contact_type.as_str() {
-                    "corporation" => {
-                        corporation_standings.insert(standing.contact_id, standing.standing);
+                for standing in standings {
+                    match standing.contact_type.as_str() {
+                        "corporation" => {
+                            corporation_standings
+                                .write()
+                                .await
+                                .insert(standing.contact_id, standing.standing);
+                        }
+                        "alliance" => {
+                            alliance_standings
+                                .write()
+                                .await
+                                .insert(standing.contact_id, standing.standing);
+                        }
+                        _ => (),
                     }
-                    "alliance" => {
-                        alliance_standings.insert(standing.contact_id, standing.standing);
-                    }
-                    _ => (),
                 }
             }
-        }
+        };
 
-        let mut page = 1;
-        loop {
-            let standings = client.get_character_contacts(page).await.unwrap();
+        let (sov_map, _, _, _) = futures::join!(
+            client.get_sovereignty_map(),
+            update_alliance_standings,
+            update_corporation_standings,
+            update_character_standings
+        );
 
-            if standings.len() == 0 {
-                break;
-            }
+        let sov_map = sov_map.unwrap();
 
-            page += 1;
-
-            for standing in standings {
-                match standing.contact_type.as_str() {
-                    "corporation" => {
-                        corporation_standings.insert(standing.contact_id, standing.standing);
-                    }
-                    "alliance" => {
-                        alliance_standings.insert(standing.contact_id, standing.standing);
-                    }
-                    _ => (),
-                }
-            }
-        }
-
-        let mut sov = HashMap::new();
-
-        let sov_map = client.get_sovereignty_map().await.unwrap();
-
+        self.sov.clear();
         for system in sov_map {
             match (system.alliance_id, system.corporation_id) {
                 (Some(a), _) => {
-                    if let Some(standing) = alliance_standings.get(&a) {
-                        sov.insert(system.system_id, *standing);
+                    if let Some(standing) = alliance_standings.read().await.get(&a) {
+                        self.sov.insert(system.system_id, *standing);
                     }
                 }
                 (_, Some(c)) => {
-                    if let Some(standing) = corporation_standings.get(&c) {
-                        sov.insert(system.system_id, *standing);
+                    if let Some(standing) = corporation_standings.read().await.get(&c) {
+                        self.sov.insert(system.system_id, *standing);
                     }
                 }
                 _ => (),
             }
         }
+    }
 
-        let mut all_systems = HashMap::new();
-        let mut all_stargates = HashMap::new();
-        let mut all_stargate_ids = Vec::new();
+    pub async fn load_system_stats(&mut self, client: &esi::Client) {
+        let (system_kills, system_jumps) = futures::join!(
+            client.get_universe_system_kills(),
+            client.get_universe_system_jumps()
+        );
 
-        for &region_id in &regions {
-            let region = client.get_universe_region(region_id).await.unwrap();
-            self.push_region(region);
-        }
-
-        for &constellation_id in &constellations {
-            let constellation = client
-                .get_universe_constellation(constellation_id)
-                .await
-                .unwrap();
-            self.push_constellation(constellation);
-        }
-
-        for &system_id in &systems {
-            let system = client.get_universe_system(system_id).await.unwrap();
-
-            if let Some(stargates) = &system.stargates {
-                all_stargate_ids.extend_from_slice(stargates);
-            }
-
-            let node_id = self.graph.add_node(Node::System {
-                system: system.system_id,
-            });
-            self.push_system(system);
-            all_systems.insert(system_id, node_id);
-            self.system_stats.insert(
-                system_id,
-                Stats {
-                    jumps: 0,
-                    npc_kills: 0,
-                    ship_kills: 0,
-                    pod_kills: 0,
-                },
-            );
-        }
+        let system_kills = system_kills.unwrap();
+        let system_jumps = system_jumps.unwrap();
 
         for sys in system_jumps {
             if let Some(stat) = self.system_stats.get_mut(&sys.system_id) {
@@ -515,17 +487,93 @@ impl World {
                 stat.pod_kills = sys.pod_kills;
             }
         }
+    }
 
-        for stargate_id in all_stargate_ids {
-            let stargate = client.get_universe_stargate(stargate_id).await.unwrap();
+    pub async fn load(&mut self, client: &esi::Client) -> Result<(), ()> {
+        let regions = client.get_universe_regions();
+        let constellations = client.get_universe_constellations();
+        let systems = client.get_universe_systems();
 
+        let (regions, constellations, systems) = futures::join!(regions, constellations, systems);
+
+        let regions = regions.unwrap();
+        let constellations = constellations.unwrap();
+        let systems = systems.unwrap();
+
+        self.load_sov_standings(&client).await;
+
+        let mut all_systems = HashMap::new();
+        let mut all_stargates = HashMap::new();
+        let mut all_stargate_ids = Vec::new();
+
+        let regions_fut: FuturesUnordered<_> = regions
+            .iter()
+            .map(|region_id| client.get_universe_region(*region_id))
+            .collect();
+
+        let constellations_fut: FuturesUnordered<_> = constellations
+            .iter()
+            .map(|constellation_id| client.get_universe_constellation(*constellation_id))
+            .collect();
+
+        let systems_fut: FuturesUnordered<_> = systems
+            .iter()
+            .map(|system_id| client.get_universe_system(*system_id))
+            .collect();
+
+        let (regions, constellations, systems): (Vec<_>, Vec<_>, Vec<_>) = futures::join!(
+            regions_fut.map(Result::unwrap).collect(),
+            constellations_fut.map(Result::unwrap).collect(),
+            systems_fut.map(Result::unwrap).collect(),
+        );
+
+        for region in regions {
+            self.push_region(region);
+        }
+
+        for constellation in constellations {
+            self.push_constellation(constellation);
+        }
+
+        for system in systems {
+            if let Some(stargates) = &system.stargates {
+                all_stargate_ids.extend_from_slice(stargates);
+            }
+
+            let node_id = self.graph.add_node(Node::System {
+                system: system.system_id,
+            });
+            all_systems.insert(system.system_id, node_id);
+            self.system_stats.insert(
+                system.system_id,
+                Stats {
+                    jumps: 0,
+                    npc_kills: 0,
+                    ship_kills: 0,
+                    pod_kills: 0,
+                },
+            );
+
+            self.push_system(system);
+        }
+
+        self.load_system_stats(client).await;
+
+        let stargates_fut: FuturesUnordered<_> = all_stargate_ids
+            .iter()
+            .map(|stargate_id| client.get_universe_stargate(*stargate_id))
+            .collect();
+
+        let stargates: Vec<_> = stargates_fut.map(Result::unwrap).collect().await;
+
+        for stargate in stargates {
             let node_id = self.graph.add_node(Node::Stargate {
-                stargate: stargate_id,
+                stargate: stargate.stargate_id,
                 source: stargate.system_id,
                 destination: stargate.destination.system_id,
             });
+            all_stargates.insert(stargate.stargate_id, node_id);
             self.push_stargate(stargate);
-            all_stargates.insert(stargate_id, node_id);
         }
 
         for system in self.systems.values() {
@@ -595,7 +643,6 @@ impl World {
             }
         }
 
-        use std::io::Read;
         let mut bridges = std::fs::File::open("bridges.tsv").unwrap();
         let mut bridges_tsv = String::new();
         bridges.read_to_string(&mut bridges_tsv).unwrap();
@@ -685,9 +732,39 @@ impl World {
                 .add_edge(left_node_id.clone(), right_node_id.clone(), edge);
         }
 
-        self.sov = sov;
+        self.spawn_background_updater(client.clone());
 
         Ok(())
+    }
+
+    fn spawn_background_updater(&self, client: esi::Client) {
+        let event_proxy = self.event_proxy.clone();
+        let player_system = self.player_system.clone();
+        tokio::spawn(async move {
+            let mut counter = 0;
+            let poll_interval = 10;
+            loop {
+                if counter % 10 == 0 {
+                    let location = client
+                        .get_character_location()
+                        .await
+                        .ok()
+                        .map(|l| l.solar_system_id);
+                    let mut current_location = player_system.lock().unwrap();
+                    if location != *current_location {
+                        *current_location = location;
+                        event_proxy.send_event(UserEvent::DataEvent(
+                            DataEvent::CharacterLocationChanged(location),
+                        ));
+                    }
+                }
+                if counter % 3600 == 0 {
+                    //update kills and jumps
+                }
+                tokio::time::delay_for(std::time::Duration::from_secs(poll_interval)).await;
+                counter += poll_interval;
+            }
+        });
     }
 
     pub fn sov_standing(&self, system: i32) -> Option<f64> {
