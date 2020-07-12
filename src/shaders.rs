@@ -111,8 +111,8 @@ impl ShaderCollection {
                                         let new_source = std::fs::read_to_string(path).unwrap();
                                         shader.source = new_source;
                                         shader.version += 1;
-                                        println!(
-                                            "Updated shader source of: {}",
+                                        log::info!(
+                                            "updated shader source of: {}",
                                             shader_path.display(),
                                         );
                                         version.fetch_add(1, Ordering::Relaxed);
@@ -126,7 +126,7 @@ impl ShaderCollection {
                             std::thread::sleep(std::time::Duration::from_millis(50))
                         }
                         Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                            eprintln!("Shader update thread disconnected");
+                            log::error!("shader update thread disconnected");
                             return;
                         }
                     }

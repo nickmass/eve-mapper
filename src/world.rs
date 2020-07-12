@@ -1,3 +1,4 @@
+use futures::future::FutureExt;
 use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt;
 use glium::glutin::event_loop::EventLoopProxy;
@@ -5,7 +6,7 @@ use petgraph::Graph;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use crate::esi;
 use crate::gfx::{DataEvent, UserEvent};
@@ -80,9 +81,9 @@ pub struct World {
     route: Vec<i32>,
     route_target: Option<(i32, i32)>,
     route_text: Vec<(i32, String)>,
-    system_stats: HashMap<i32, Stats>,
-    player_system: Arc<Mutex<Option<i32>>>,
-    sov: HashMap<i32, f64>,
+    system_stats: Arc<RwLock<HashMap<i32, Stats>>>,
+    player_system: Arc<RwLock<Option<i32>>>,
+    sov: Arc<RwLock<HashMap<i32, f64>>>,
     event_proxy: EventLoopProxy<UserEvent>,
 }
 
@@ -98,9 +99,9 @@ impl World {
             route: Vec::new(),
             route_target: None,
             route_text: Vec::new(),
-            system_stats: HashMap::new(),
-            player_system: Arc::new(Mutex::new(None)),
-            sov: HashMap::new(),
+            system_stats: Arc::new(RwLock::new(HashMap::new())),
+            player_system: Arc::new(RwLock::new(None)),
+            sov: Arc::new(RwLock::new(HashMap::new())),
             event_proxy,
         }
     }
@@ -151,7 +152,8 @@ impl World {
     }
 
     pub fn stats(&self, system_id: i32) -> Option<Stats> {
-        self.system_stats.get(&system_id).cloned()
+        let stats = self.system_stats.read().unwrap();
+        stats.get(&system_id).cloned()
     }
 
     pub fn create_route(&mut self, from: i32, to: i32) {
@@ -329,7 +331,10 @@ impl World {
         &self.route_text
     }
 
-    pub async fn load_sov_standings(&mut self, client: &esi::Client) {
+    pub async fn load_sov_standings(
+        sov_standings: &Arc<RwLock<HashMap<i32, f64>>>,
+        client: &esi::Client,
+    ) {
         use tokio::sync::RwLock;
 
         let character = client.get_character_self().await.unwrap();
@@ -439,49 +444,61 @@ impl World {
         };
 
         let (sov_map, _, _, _) = futures::join!(
-            client.get_sovereignty_map(),
+            client.get_sovereignty_map().map(Result::unwrap),
             update_alliance_standings,
             update_corporation_standings,
             update_character_standings
         );
 
-        let sov_map = sov_map.unwrap();
+        {
+            let mut sov = sov_standings.write().unwrap();
+            sov.clear();
+        }
 
-        self.sov.clear();
         for system in sov_map {
-            match (system.alliance_id, system.corporation_id) {
-                (Some(a), _) => {
-                    if let Some(standing) = alliance_standings.read().await.get(&a) {
-                        self.sov.insert(system.system_id, *standing);
-                    }
-                }
-                (_, Some(c)) => {
-                    if let Some(standing) = corporation_standings.read().await.get(&c) {
-                        self.sov.insert(system.system_id, *standing);
-                    }
-                }
-                _ => (),
+            let alliance = if let Some(alliance_id) = system.alliance_id {
+                alliance_standings.read().await.get(&alliance_id).cloned()
+            } else {
+                None
+            };
+            let corporation = if let Some(corporation_id) = system.corporation_id {
+                corporation_standings
+                    .read()
+                    .await
+                    .get(&corporation_id)
+                    .cloned()
+            } else {
+                None
+            };
+
+            if let Some(standing) = alliance.or(corporation) {
+                let mut sov = sov_standings.write().unwrap();
+                sov.insert(system.system_id, standing);
+            } else if system.alliance_id.is_some() || system.corporation_id.is_some() {
+                let mut sov = sov_standings.write().unwrap();
+                sov.insert(system.system_id, 0.0);
             }
         }
     }
 
-    pub async fn load_system_stats(&mut self, client: &esi::Client) {
+    pub async fn load_system_stats(
+        system_stats: &Arc<RwLock<HashMap<i32, Stats>>>,
+        client: &esi::Client,
+    ) {
         let (system_kills, system_jumps) = futures::join!(
-            client.get_universe_system_kills(),
-            client.get_universe_system_jumps()
+            client.get_universe_system_kills().map(Result::unwrap),
+            client.get_universe_system_jumps().map(Result::unwrap)
         );
 
-        let system_kills = system_kills.unwrap();
-        let system_jumps = system_jumps.unwrap();
-
+        let mut stats = system_stats.write().unwrap();
         for sys in system_jumps {
-            if let Some(stat) = self.system_stats.get_mut(&sys.system_id) {
+            if let Some(stat) = stats.get_mut(&sys.system_id) {
                 stat.jumps = sys.ship_jumps;
             }
         }
 
         for sys in system_kills {
-            if let Some(stat) = self.system_stats.get_mut(&sys.system_id) {
+            if let Some(stat) = stats.get_mut(&sys.system_id) {
                 stat.npc_kills = sys.npc_kills;
                 stat.ship_kills = sys.ship_kills;
                 stat.pod_kills = sys.pod_kills;
@@ -499,8 +516,6 @@ impl World {
         let regions = regions.unwrap();
         let constellations = constellations.unwrap();
         let systems = systems.unwrap();
-
-        self.load_sov_standings(&client).await;
 
         let mut all_systems = HashMap::new();
         let mut all_stargates = HashMap::new();
@@ -544,20 +559,21 @@ impl World {
                 system: system.system_id,
             });
             all_systems.insert(system.system_id, node_id);
-            self.system_stats.insert(
-                system.system_id,
-                Stats {
-                    jumps: 0,
-                    npc_kills: 0,
-                    ship_kills: 0,
-                    pod_kills: 0,
-                },
-            );
+            {
+                let mut stats = self.system_stats.write().unwrap();
+                stats.insert(
+                    system.system_id,
+                    Stats {
+                        jumps: 0,
+                        npc_kills: 0,
+                        ship_kills: 0,
+                        pod_kills: 0,
+                    },
+                );
+            }
 
             self.push_system(system);
         }
-
-        self.load_system_stats(client).await;
 
         let stargates_fut: FuturesUnordered<_> = all_stargate_ids
             .iter()
@@ -740,6 +756,8 @@ impl World {
     fn spawn_background_updater(&self, client: esi::Client) {
         let event_proxy = self.event_proxy.clone();
         let player_system = self.player_system.clone();
+        let system_stats = self.system_stats.clone();
+        let sov_standings = self.sov.clone();
         tokio::spawn(async move {
             let mut counter = 0;
             let poll_interval = 10;
@@ -750,16 +768,21 @@ impl World {
                         .await
                         .ok()
                         .map(|l| l.solar_system_id);
-                    let mut current_location = player_system.lock().unwrap();
+                    let mut current_location = player_system.write().unwrap();
                     if location != *current_location {
                         *current_location = location;
-                        event_proxy.send_event(UserEvent::DataEvent(
+                        let _ = event_proxy.send_event(UserEvent::DataEvent(
                             DataEvent::CharacterLocationChanged(location),
                         ));
                     }
                 }
-                if counter % 3600 == 0 {
-                    //update kills and jumps
+                if counter % 300 == 0 {
+                    World::load_system_stats(&system_stats, &client).await;
+                    World::load_sov_standings(&sov_standings, &client).await;
+                    let _ = event_proxy
+                        .send_event(UserEvent::DataEvent(DataEvent::SovStandingsChanged));
+                    let _ =
+                        event_proxy.send_event(UserEvent::DataEvent(DataEvent::SystemStatsChanged));
                 }
                 tokio::time::delay_for(std::time::Duration::from_secs(poll_interval)).await;
                 counter += poll_interval;
@@ -768,7 +791,8 @@ impl World {
     }
 
     pub fn sov_standing(&self, system: i32) -> Option<f64> {
-        self.sov.get(&system).cloned()
+        let sov = self.sov.read().unwrap();
+        sov.get(&system).cloned()
     }
 
     pub fn match_system(&self, search: &str) -> Vec<i32> {
@@ -795,6 +819,6 @@ impl World {
     }
 
     pub fn location(&self) -> Option<i32> {
-        *self.player_system.lock().unwrap()
+        *self.player_system.read().unwrap()
     }
 }

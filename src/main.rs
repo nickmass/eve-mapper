@@ -1,11 +1,11 @@
 mod cache;
-pub(crate) mod error;
+mod error;
 mod esi;
 mod font;
 mod gfx;
-pub(crate) mod math;
+mod math;
 mod oauth;
-pub(crate) mod shaders;
+mod shaders;
 mod world;
 
 fn main() {

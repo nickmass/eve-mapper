@@ -1,4 +1,4 @@
-use reqwest::Url;
+use reqwest::{header, Response, Url};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -56,7 +56,7 @@ impl Client {
 
         tokio::spawn(async move {
             loop {
-                tokio::time::delay_for(std::time::Duration::from_secs(30)).await;
+                tokio::time::delay_for(std::time::Duration::from_secs(120)).await;
                 let save_res = inner_cache.save().await;
                 match save_res {
                     Err(error) => log::error!("cache save error: {:?}", error),
@@ -111,26 +111,31 @@ impl Client {
         let path_hash = format!("{:x}", sha2::Sha256::digest(url.as_str().as_bytes()));
 
         let mut request = self.client.get(url.clone()).header(
-            "User-Agent",
+            header::USER_AGENT,
             "EveMapper-Development v0.01: nickmass@nickmass.com",
         );
 
         if auth {
             let auth = self.profile.read().await.token.authorization();
-            request = request.header("Authorization", auth);
+            request = request.header(header::AUTHORIZATION, auth);
         }
 
-        let mut request = request.build().map_err(|e| Error::InvalidRequest(e))?;
-
         log::debug!("looking up url in cache: {}", &url);
-        match self.cache.get(&path_hash, cache_kind).await {
+        let (etag, cached_value) = match self.cache.get(&path_hash, cache_kind).await {
             Ok(value) => return Ok(value),
-            Err(CacheError::Expired(value)) if ALWAYS_CACHE => {
+            Err(CacheError::Expired(_, value)) if ALWAYS_CACHE => {
                 log::info!("returning expired data: {}", &url);
                 return Ok(value);
             }
-            Err(_) => (),
+            Err(CacheError::Expired(etag, value)) => (etag, Some(value)),
+            Err(_) => (None, None),
         };
+
+        if let Some(etag) = etag {
+            request = request.header(header::IF_NONE_MATCH, etag)
+        }
+
+        let mut request = request.build().map_err(|e| Error::InvalidRequest(e))?;
 
         let mut retry_count: u32 = 0;
 
@@ -152,10 +157,18 @@ impl Client {
                 request_start.elapsed().as_millis()
             );
 
+            let warning = response
+                .headers()
+                .get(header::WARNING)
+                .and_then(|s| s.to_str().ok());
+            if let Some(warning) = warning {
+                log::warn!("warning in header {}: {}", uuid, warning);
+            }
+
             let reauth = auth && status_code == 401 || status_code == 403;
             let retry = response.status().is_server_error() || response.status().is_client_error();
             let limit = response.headers().get("X-Esi-Error-Limit-Reset");
-            let expires = response.headers().get("expires").cloned();
+            let expires = response.headers().get(header::EXPIRES).cloned();
 
             if reauth {
                 log::info!("esi refreshing authentication token {}", uuid);
@@ -177,7 +190,7 @@ impl Client {
 
                     request
                         .headers_mut()
-                        .get_mut("Authorization")
+                        .get_mut(header::AUTHORIZATION)
                         .map(|v| *v = header_value);
                 }
             }
@@ -202,25 +215,34 @@ impl Client {
                     .as_ref()
                     .and_then(|v| v.to_str().map(String::from).ok())
                     .and_then(|v| httpdate::parse_http_date(&v).ok());
+                let etag = parse_etag(&response);
 
-                let bytes = response
-                    .bytes()
-                    .await
-                    .map_err(Error::CannotRetrieveRequestBody)?;
-                let value = serde_json::from_slice(&bytes).map_err(Error::ResponseDeserialize)?;
+                let value = if let (Some(value), true) = (
+                    cached_value,
+                    response.status() == reqwest::StatusCode::NOT_MODIFIED,
+                ) {
+                    value
+                } else {
+                    let bytes = response
+                        .bytes()
+                        .await
+                        .map_err(Error::CannotRetrieveRequestBody)?;
+                    serde_json::from_slice(&bytes).map_err(Error::ResponseDeserialize)?
+                };
 
                 if let Some(expires) = parsed_expires {
                     let cache_res = self
                         .cache
-                        .store(&path_hash, cache_kind, &value, expires)
+                        .store(&path_hash, cache_kind, &value, etag, expires)
                         .await;
                     match cache_res {
-                        Err(error) => log::error!("unable to store in cache: {:?}", error),
+                        Err(error) => log::error!("unable to store in cache {}: {:?}", uuid, error),
                         _ => (),
                     }
                 } else {
                     log::warn!(
-                        "Invalid or missing expires header, skipping cache: {:?}",
+                        "Invalid or missing expires header, skipping cache {}: {:?}",
+                        uuid,
                         expires
                     );
                 }
@@ -344,6 +366,18 @@ impl Client {
         let url = format!("sovereignty/map/");
         self.get_no_cache(&url).await
     }
+}
+
+fn parse_etag(response: &Response) -> Option<String> {
+    response
+        .headers()
+        .get(header::ETAG)
+        .and_then(|s| header::HeaderValue::to_str(s).ok())
+        .map(str::trim)
+        .and_then(|s| match s.as_bytes() {
+            [b'"', s @ .., b'"'] => String::from_utf8(s.to_owned()).ok(),
+            _ => None,
+        })
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

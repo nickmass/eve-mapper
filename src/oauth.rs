@@ -44,19 +44,19 @@ pub async fn load_or_authorize() -> Result<Profile, Error> {
             return Ok(profile);
         }
         if let Ok(_) = verify(&profile.token).await {
-            eprintln!("Using existing profile");
+            log::info!("using existing oauth profile");
             Ok(profile)
         } else {
-            eprintln!("Token expired, refreshing");
+            log::info!("oauth token expired, refreshing");
             if let Ok(profile) = refresh(profile).await {
                 Ok(profile)
             } else {
-                eprintln!("Token invalid, authorizing");
+                log::info!("oauth token invalid, authorizing");
                 authorize().await
             }
         }
     } else {
-        eprintln!("No Profile Found, authorizing");
+        log::info!("no oauth profile found, authorizing");
         authorize().await
     }
 }
@@ -92,13 +92,24 @@ pub async fn authorize() -> Result<Profile, Error> {
 
             start_tx.send(()).unwrap();
             if let Err(e) = server.await {
-                eprintln!("Error: {}", e);
+                log::error!("oauth server error: {}", e);
             }
         }
     });
 
     let _ = start_rx.await.unwrap();
-    webbrowser::open(&format!("http://localhost:{}/esi-redirect/", PORT)).unwrap();
+    let auth_url = format!("http://localhost:{}/esi-redirect/", PORT);
+    log::info!(
+        "opening authorization page in default web browser: {}",
+        auth_url
+    );
+
+    std::thread::spawn(move || {
+        let browser_err = webbrowser::open(&auth_url);
+        if let Err(error) = browser_err {
+            log::error!("unable to open browser: {:?}", error);
+        }
+    });
 
     let profile = profile_rx.recv().await.unwrap();
     end_tx.send(()).unwrap();
@@ -111,7 +122,7 @@ pub async fn authorize() -> Result<Profile, Error> {
 }
 
 pub async fn refresh(mut profile: Profile) -> Result<Profile, Error> {
-    eprintln!("Refreshing Credentials");
+    log::info!("refreshing oauth credentials");
     let mut request_body = HashMap::new();
     request_body.insert("grant_type", "refresh_token".to_string());
     request_body.insert("refresh_token", profile.token.refresh_token.to_string());
@@ -310,7 +321,7 @@ impl hyper::service::Service<Request<Body>> for OauthService {
                     Ok(response)
                 }
                 (m, p) => {
-                    eprintln!("Unexpected request: {} {}", m, p);
+                    log::warn!("unexpected oauth request: {} {}", m, p);
                     let response = Response::builder().status(404).body(Body::empty()).unwrap();
                     Ok(response)
                 }

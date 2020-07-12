@@ -43,6 +43,7 @@ struct Store<T: Expiry> {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct Entry {
     expires: u64,
+    etag: Option<String>,
     data: Vec<u8>,
 }
 
@@ -54,7 +55,7 @@ pub enum CacheKind {
 
 #[derive(Debug, Clone)]
 pub enum CacheError<T> {
-    Expired(T),
+    Expired(Option<String>, T),
     NonExistant,
 }
 
@@ -98,6 +99,7 @@ impl Cache {
         key: K,
         kind: CacheKind,
         value: T,
+        etag: Option<String>,
         expires: SystemTime,
     ) -> Result<(), Error> {
         let expires = expires
@@ -105,8 +107,8 @@ impl Cache {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         match kind {
-            CacheKind::Static => self.static_store.store(key, value, expires).await,
-            CacheKind::Dynamic => self.dynamic_store.store(key, value, expires).await,
+            CacheKind::Static => self.static_store.store(key, value, etag, expires).await,
+            CacheKind::Dynamic => self.dynamic_store.store(key, value, etag, expires).await,
         }
     }
 
@@ -146,7 +148,7 @@ impl<E: Expiry> Store<E> {
             let data = flexbuffers::from_slice(&entry.data);
             if let Ok(data) = data {
                 if E::is_expired(entry.expires) {
-                    Err(CacheError::Expired(data))
+                    Err(CacheError::Expired(entry.etag.clone(), data))
                 } else {
                     Ok(data)
                 }
@@ -162,12 +164,17 @@ impl<E: Expiry> Store<E> {
         &self,
         key: K,
         value: T,
+        etag: Option<String>,
         expires: u64,
     ) -> Result<(), Error> {
         let key = key.as_ref().to_owned();
         let mut map = self.entries.write().await;
         let data = flexbuffers::to_vec(value).map_err(Error::Serialize)?;
-        let entry = Entry { expires, data };
+        let entry = Entry {
+            expires,
+            data,
+            etag,
+        };
         map.insert(key.clone(), entry);
         *self.dirty.write().await = true;
         Ok(())

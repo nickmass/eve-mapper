@@ -53,6 +53,8 @@ pub struct Map<'a> {
     region_names_layer: Option<RegionNamesLayer>,
     system_names: Vec<super::TextNode>,
     player_location: Option<i32>,
+    sov_vertexes: Option<Vec<SystemData>>,
+    sov_vertex_buffer: Option<glium::VertexBuffer<SystemData>>,
 }
 
 impl<'a> Map<'a> {
@@ -114,6 +116,8 @@ impl<'a> Map<'a> {
             region_names_layer: Some(RegionNamesLayer::Foreground),
             system_names: Vec::new(),
             player_location: None,
+            sov_vertexes: None,
+            sov_vertex_buffer: None,
         }
     }
 }
@@ -125,6 +129,9 @@ impl<'a> Widget for Map<'a> {
                 UserEvent::DataEvent(DataEvent::CharacterLocationChanged(location)) => {
                     self.player_location = location.clone();
                     self.system_vertexes = None;
+                }
+                UserEvent::DataEvent(DataEvent::SovStandingsChanged) => {
+                    self.map_systems = None;
                 }
                 UserEvent::QueryEvent(QueryEvent::RouteChanged) => {
                     self.map_jumps = None;
@@ -218,6 +225,8 @@ impl<'a> Widget for Map<'a> {
 
         let text_transform = text_screen_matrix * text_scale_matrix * text_view_matrix;
 
+        let text_scale = self.window_size.y / 2160.0;
+
         if input_state.mouse_move_delta() != math::V2::fill(0.0) {
             let mut selected_system = None;
 
@@ -238,6 +247,7 @@ impl<'a> Widget for Map<'a> {
                 )));
 
                 self.system_vertexes = None;
+                self.jump_vertexes = None;
             }
         }
 
@@ -280,6 +290,7 @@ impl<'a> Widget for Map<'a> {
             self.map_systems = Some(map_systems);
             self.jump_vertexes = None;
             self.system_vertexes = None;
+            self.sov_vertexes = None;
             text_dirty = true;
         }
 
@@ -361,7 +372,7 @@ impl<'a> Widget for Map<'a> {
                             font,
                             position,
                             anchor: super::font::TextAnchor::Center,
-                            scale,
+                            scale: scale * text_scale,
                             color,
                             shadow,
                         })
@@ -370,8 +381,8 @@ impl<'a> Widget for Map<'a> {
             }
 
             self.system_names.clear();
-            if self.current_zoom > 15.0 {
-                let alpha = ((self.current_zoom - 15.0) / (25.0 - 15.0)).min(1.0);
+            if self.current_zoom > 10.0 {
+                let alpha = ((self.current_zoom - 10.0) / (20.0 - 10.0)).min(1.0);
 
                 if let Some(systems) = self.map_systems.as_ref() {
                     for system in systems.values() {
@@ -395,7 +406,7 @@ impl<'a> Widget for Map<'a> {
                         let node = super::TextNode {
                             text: system.name.to_string(),
                             font: self.context.ui_font,
-                            scale: 25.0,
+                            scale: (25.0 * text_scale).max(14.0),
                             position: pos,
                             anchor: super::font::TextAnchor::TopLeft,
                             color: color.expand(alpha),
@@ -426,7 +437,7 @@ impl<'a> Widget for Map<'a> {
                     let left_system = left_system.unwrap();
                     let right_system = right_system.unwrap();
 
-                    let (left_color, right_color) = match (
+                    let (mut left_color, mut right_color) = match (
                         jump.jump_type,
                         jump.on_route,
                         left_system.security_status,
@@ -440,6 +451,14 @@ impl<'a> Widget for Map<'a> {
                             (super::jump_type_color(&jump), super::jump_type_color(&jump))
                         }
                     };
+
+                    if Some(left_system.system_id) == self.selected_system {
+                        left_color = left_color + math::V3::fill(0.1);
+                    }
+
+                    if Some(right_system.system_id) == self.selected_system {
+                        right_color = right_color + math::V3::fill(0.1);
+                    }
 
                     let level = if jump.on_route { 1.0 } else { 0.0 };
 
@@ -519,22 +538,14 @@ impl<'a> Widget for Map<'a> {
                         };
 
                         let scale = if is_player_system {
-                            3.0
+                            4.0
                         } else if is_focused {
                             2.0
                         } else {
                             1.0
                         };
 
-                        let color = if system.security_status <= 0.0 {
-                            if let Some(sov) = system.sovereignty_standing {
-                                super::standing_color(sov)
-                            } else {
-                                super::sec_status_color(system.security_status)
-                            }
-                        } else {
-                            super::sec_status_color(system.security_status)
-                        };
+                        let color = super::sec_status_color(system.security_status);
 
                         SystemData {
                             center: system.position,
@@ -549,6 +560,32 @@ impl<'a> Widget for Map<'a> {
 
                 self.system_vertexes = Some(system_vertexes);
                 self.systems_vertex_buffer = None;
+            }
+        }
+
+        if self.sov_vertexes.is_none() {
+            if let Some(systems) = self.map_systems.as_ref() {
+                let sov_systems = systems
+                    .values()
+                    .filter_map(|system| {
+                        if let Some(sov) = system.sovereignty_standing {
+                            let color = super::standing_color(sov).expand(0.3);
+                            Some(SystemData {
+                                center: system.position,
+                                highlight: math::V4::fill(0.0),
+                                color,
+                                system_id: system.system_id,
+                                scale: 8.0,
+                                radius: 25.0,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                self.sov_vertexes = Some(sov_systems);
+                self.sov_vertex_buffer = None;
             }
         }
 
@@ -574,6 +611,18 @@ impl<'a> Widget for Map<'a> {
                     Err(error) => {
                         log::error!("failed to create map jumps vertex buffer: {}", error)
                     }
+                }
+
+                self.context.request_redraw()
+            }
+        }
+
+        if self.sov_vertex_buffer.is_none() {
+            if let Some(vertexes) = self.sov_vertexes.as_ref() {
+                let sov_system_data = glium::VertexBuffer::new(&self.context.display, &vertexes);
+                match sov_system_data {
+                    Ok(buf) => self.sov_vertex_buffer = Some(buf),
+                    Err(error) => log::error!("failed to create map sov vertex buffer: {}", error),
                 }
 
                 self.context.request_redraw()
@@ -630,6 +679,23 @@ impl<'a> Widget for Map<'a> {
 
             if let Err(error) = draw_res {
                 log::error!("map region names draw error: {:?}", error);
+            }
+        }
+
+        if let Some(sov_data) = self.sov_vertex_buffer.as_ref() {
+            let draw_res = frame.draw(
+                (
+                    &graphics_state.circle_model,
+                    sov_data.per_instance().unwrap(),
+                ),
+                &glium::index::NoIndices(glium::index::PrimitiveType::TriangleFan),
+                &graphics_state.system_program,
+                &uniforms,
+                &self.system_draw_params,
+            );
+
+            if let Err(error) = draw_res {
+                log::error!("map sov draw error: {:?}", error);
             }
         }
 

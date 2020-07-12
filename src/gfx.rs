@@ -27,6 +27,8 @@ pub enum UserEvent {
 #[derive(Clone, Debug)]
 pub enum DataEvent {
     CharacterLocationChanged(Option<i32>),
+    SovStandingsChanged,
+    SystemStatsChanged,
 }
 
 #[derive(Clone, Debug)]
@@ -211,6 +213,7 @@ impl Window {
                 | Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
                     graphics_context.request_redraw()
                 }
+                Event::NewEvents(_) => {}
                 Event::MainEventsCleared => {
                     let dt = frame_time.elapsed();
 
@@ -261,6 +264,7 @@ impl Window {
                     }
                 }
                 Event::RedrawEventsCleared => {}
+                Event::LoopDestroyed => {}
                 event => input_state.process(event),
             }
         })
@@ -277,6 +281,9 @@ impl Window {
             match event {
                 UserEvent::MapEvent(MapEvent::SelectedSystemChanged(system)) => {
                     user_state.selected_system = system.clone();
+                    graphics_context.request_redraw();
+                }
+                UserEvent::DataEvent(DataEvent::SovStandingsChanged) => {
                     graphics_context.request_redraw();
                 }
                 _ => (),
@@ -526,22 +533,22 @@ impl Window {
 
             match systems_program {
                 Ok(program) => graphics_state.system_program = program,
-                Err(err) => eprintln!("{:?}", err),
+                Err(err) => log::error!("error creating systems shader: {:?}", err),
             }
 
             match jumps_program {
                 Ok(program) => graphics_state.jump_program = program,
-                Err(err) => eprintln!("{:?}", err),
+                Err(err) => log::error!("error creating jumps shader: {:?}", err),
             }
 
             match text_program {
                 Ok(program) => graphics_state.text_program = program,
-                Err(err) => eprintln!("{:?}", err),
+                Err(err) => log::error!("error creating text shader: {:?}", err),
             }
 
             graphics_state.shader_version = new_version;
 
-            println!("Shaders re-loaded");
+            log::info!("shaders re-loaded");
         }
     }
 }
@@ -556,13 +563,13 @@ fn standing_color(standing: f64) -> math::V3<f32> {
     if standing == 0.0 {
         math::v3(0.5, 0.5, 0.5)
     } else if standing > 0.5 {
-        math::v3(0.0, 0.0, 1.0)
+        math::v3(0.0, 0.15, 1.0)
     } else if standing > 0.0 {
-        math::v3(0.25, 0.5, 1.0)
+        math::v3(0.0, 0.5, 1.0)
     } else if standing < -0.5 {
-        math::v3(1.0, 0.0, 0.0)
+        math::v3(1.0, 0.02, 0.0)
     } else {
-        math::v3(1.0, 0.5, 0.25)
+        math::v3(1.0, 0.5, 0.0)
     }
 }
 
