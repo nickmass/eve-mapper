@@ -2,7 +2,7 @@ use crate::math;
 use crate::world::{JumpType, World};
 
 use super::{
-    DataEvent, GraphicsContext, GraphicsState, InputState, LineVertex, MapEvent, MouseButton,
+    font, DataEvent, GraphicsContext, GraphicsState, InputState, LineVertex, MapEvent, MouseButton,
     QueryEvent, SystemData, UserEvent, Widget,
 };
 
@@ -49,9 +49,9 @@ pub struct Map<'a> {
     window_size: math::V2<f32>,
     map_offset: math::V2<f32>,
     system_magnitude: f64,
-    region_names: Vec<super::TextNode>,
+    region_names: Vec<font::PositionedTextSpan>,
     region_names_layer: Option<RegionNamesLayer>,
-    system_names: Vec<super::TextNode>,
+    system_names: Vec<font::PositionedTextSpan>,
     player_location: Option<i32>,
     sov_vertexes: Option<Vec<SystemData>>,
     sov_vertex_buffer: Option<glium::VertexBuffer<SystemData>>,
@@ -280,7 +280,7 @@ impl<'a> Widget for Map<'a> {
                             name: s.name.to_string(),
                             position,
                             security_status: s.security_status,
-                            sovereignty_standing,
+                            sovereignty_standing: sovereignty_standing.map(|s| s.standing),
                         },
                     )
                 })
@@ -367,22 +367,26 @@ impl<'a> Widget for Map<'a> {
                         let position = positions / (count as f32);
                         let position = (text_transform * position.expand(1.0)).collapse();
 
-                        self.region_names.push(super::TextNode {
-                            text: region.name.to_string(),
-                            font,
+                        let scale = scale * text_scale;
+                        let mut span = font::TextSpan::new(scale, font, color);
+                        span.push(&region.name);
+                        let span = self.context.font_cache.layout(
+                            span,
+                            font::TextAnchor::Center,
                             position,
-                            anchor: super::font::TextAnchor::Center,
-                            scale: scale * text_scale,
-                            color,
                             shadow,
-                        })
+                        );
+
+                        if let Some(span) = span {
+                            self.region_names.push(span);
+                        }
                     }
                 }
             }
 
             self.system_names.clear();
-            if self.current_zoom > 10.0 {
-                let alpha = ((self.current_zoom - 10.0) / (20.0 - 10.0)).min(1.0);
+            if self.current_zoom > 6.0 {
+                let alpha = ((self.current_zoom - 6.0) / (13.0 - 6.0)).min(1.0);
 
                 if let Some(systems) = self.map_systems.as_ref() {
                     for system in systems.values() {
@@ -403,17 +407,21 @@ impl<'a> Widget for Map<'a> {
 
                         let pos = pos + math::V2::fill(0.2 * self.current_zoom.min(50.0));
 
-                        let node = super::TextNode {
-                            text: system.name.to_string(),
-                            font: self.context.ui_font,
-                            scale: (25.0 * text_scale).max(14.0),
-                            position: pos,
-                            anchor: super::font::TextAnchor::TopLeft,
-                            color: color.expand(alpha),
-                            shadow: true,
-                        };
+                        let scale = (25.0 * text_scale).max(14.0);
+                        let mut span =
+                            font::TextSpan::new(scale, self.context.ui_font, color.expand(alpha));
+                        span.push(&system.name);
 
-                        self.system_names.push(node);
+                        let span = self.context.font_cache.layout(
+                            span,
+                            font::TextAnchor::TopLeft,
+                            pos,
+                            true,
+                        );
+
+                        if let Some(span) = span {
+                            self.system_names.push(span);
+                        }
                     }
                 }
             }
@@ -437,19 +445,16 @@ impl<'a> Widget for Map<'a> {
                     let left_system = left_system.unwrap();
                     let right_system = right_system.unwrap();
 
-                    let (mut left_color, mut right_color) = match (
-                        jump.jump_type,
-                        jump.on_route,
-                        left_system.security_status,
-                        right_system.security_status,
-                    ) {
-                        (_, true, left, right) => (
-                            super::sec_status_color(left),
-                            super::sec_status_color(right),
-                        ),
-                        (jump, false, _, _) => {
-                            (super::jump_type_color(&jump), super::jump_type_color(&jump))
-                        }
+                    let (mut left_color, mut right_color) = if jump.on_route {
+                        (
+                            super::sec_status_color(left_system.security_status),
+                            super::sec_status_color(right_system.security_status),
+                        )
+                    } else {
+                        (
+                            super::jump_type_color(&jump.jump_type),
+                            super::jump_type_color(&jump.jump_type),
+                        )
                     };
 
                     if Some(left_system.system_id) == self.selected_system {
@@ -631,19 +636,12 @@ impl<'a> Widget for Map<'a> {
     }
 
     fn draw<S: glium::Surface>(&mut self, graphics_state: &GraphicsState, frame: &mut S) {
-        let font_atlas_sampler = graphics_state
-            .font_cache
-            .texture()
-            .sampled()
-            .magnify_filter(glium::uniforms::MagnifySamplerFilter::Nearest)
-            .minify_filter(glium::uniforms::MinifySamplerFilter::Nearest);
-
         let uniforms = glium::uniform! {
             map_scale_matrix: self.scale_matrix,
             map_view_matrix: self.view_matrix,
             zoom: self.current_zoom,
             window_size: self.window_size,
-            font_atlas: font_atlas_sampler
+            font_atlas: self.context.font_cache.sampler()
         };
 
         if self.region_names_layer == Some(RegionNamesLayer::Background)
@@ -651,20 +649,9 @@ impl<'a> Widget for Map<'a> {
         {
             let mut text_buf = Vec::new();
             for text in self.region_names.iter() {
-                graphics_state
+                self.context
                     .font_cache
-                    .prepare(
-                        text.font,
-                        text.text.as_str(),
-                        &mut text_buf,
-                        text.scale,
-                        text.anchor,
-                        text.position,
-                        text.color,
-                        self.window_size,
-                        text.shadow,
-                    )
-                    .unwrap();
+                    .draw(text, &mut text_buf, self.window_size);
             }
 
             let text_data_buf = glium::VertexBuffer::new(&self.context.display, &text_buf).unwrap();
@@ -733,20 +720,9 @@ impl<'a> Widget for Map<'a> {
         if self.system_names.len() > 0 {
             let mut text_buf = Vec::new();
             for text in self.system_names.iter() {
-                graphics_state
+                self.context
                     .font_cache
-                    .prepare(
-                        text.font,
-                        text.text.as_str(),
-                        &mut text_buf,
-                        text.scale,
-                        text.anchor,
-                        text.position,
-                        text.color,
-                        self.window_size,
-                        text.shadow,
-                    )
-                    .unwrap();
+                    .draw(text, &mut text_buf, self.window_size);
             }
 
             let text_data_buf = glium::VertexBuffer::new(&self.context.display, &text_buf).unwrap();
@@ -769,20 +745,9 @@ impl<'a> Widget for Map<'a> {
         {
             let mut text_buf = Vec::new();
             for text in self.region_names.iter() {
-                graphics_state
+                self.context
                     .font_cache
-                    .prepare(
-                        text.font,
-                        text.text.as_str(),
-                        &mut text_buf,
-                        text.scale,
-                        text.anchor,
-                        text.position,
-                        text.color,
-                        self.window_size,
-                        text.shadow,
-                    )
-                    .unwrap();
+                    .draw(text, &mut text_buf, self.window_size);
             }
 
             let text_data_buf = glium::VertexBuffer::new(&self.context.display, &text_buf).unwrap();

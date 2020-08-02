@@ -22,6 +22,7 @@ pub enum UserEvent {
     DataEvent(DataEvent),
     MapEvent(MapEvent),
     QueryEvent(QueryEvent),
+    FrameDrawn,
 }
 
 #[derive(Clone, Debug)]
@@ -54,20 +55,11 @@ struct UserState {
     selected_system: Option<i32>,
 }
 
-struct TextNode {
-    font: font::FontId,
-    scale: f32,
-    position: math::V2<f32>,
-    text: String,
-    anchor: font::TextAnchor,
-    color: math::V4<f32>,
-    shadow: bool,
-}
-
 pub struct GraphicsContext {
     pub display: glium::Display,
     pub ui_font: font::FontId,
     pub title_font: font::FontId,
+    pub font_cache: font::FontCache,
 }
 
 impl GraphicsContext {
@@ -83,10 +75,6 @@ struct GraphicsState {
     text_program: glium::Program,
     shader_collection: shaders::ShaderCollection,
     shader_version: usize,
-    ui_font: font::FontId,
-    title_font: font::FontId,
-    font_cache: font::FontCache,
-    text_nodes: Vec<TextNode>,
 }
 
 impl Window {
@@ -151,16 +139,13 @@ impl Window {
             text_program,
             shader_collection,
             shader_version,
-            font_cache,
-            ui_font,
-            title_font,
-            text_nodes: Vec::new(),
         };
 
         let graphics_context = GraphicsContext {
             display,
             ui_font,
             title_font,
+            font_cache,
         };
 
         let user_state = UserState {
@@ -209,10 +194,6 @@ impl Window {
         self.event_loop.run(move |event, _window, control_flow| {
             use glutin::event::*;
             match event {
-                Event::NewEvents(StartCause::Poll)
-                | Event::NewEvents(StartCause::ResumeTimeReached { .. }) => {
-                    graphics_context.request_redraw()
-                }
                 Event::NewEvents(_) => {}
                 Event::MainEventsCleared => {
                     let dt = frame_time.elapsed();
@@ -262,6 +243,9 @@ impl Window {
                         render_time = Instant::now();
                         frame_count = 0;
                     }
+
+                    //Send this event to ensure we run the updates for the next frame to continue any animations that may be ongoing
+                    input_state.send_user_event(UserEvent::FrameDrawn);
                 }
                 Event::RedrawEventsCleared => {}
                 Event::LoopDestroyed => {}
@@ -340,25 +324,6 @@ impl Window {
         let player_location = world.location();
         let window_size = input_state.window_size.as_f32();
 
-        let mut stats_strings = Vec::new();
-        for system in world.systems() {
-            if Some(system.system_id) == user_state.selected_system {
-                let stats = world.stats(system.system_id);
-                stats_strings.push(format!("{} ({:.2})", system.name, system.security_status));
-
-                if let Some(stats) = stats {
-                    stats_strings.push(format!(
-                        "Ship Kills: {} Pod Kills: {}",
-                        stats.ship_kills, stats.pod_kills
-                    ));
-                    stats_strings.push(format!(
-                        "Jumps: {} NPC Kills: {}",
-                        stats.jumps, stats.npc_kills
-                    ));
-                }
-            }
-        }
-
         let mut line_height = 10.0;
         let mut first = true;
         let mut player_on_route = if let Some(location) = player_location {
@@ -366,6 +331,9 @@ impl Window {
         } else {
             false
         };
+
+        let mut pos_nodes = Vec::new();
+
         for (system, line) in world.route_text() {
             let height = if first { 40.0 } else { 25.0 };
             let color = if first {
@@ -378,65 +346,148 @@ impl Window {
             } else {
                 math::V4::fill(1.0)
             };
-            let node = TextNode {
-                text: line.clone(),
-                font: graphics_state.ui_font,
-                scale: height,
-                position: math::v2(5.0, line_height),
-                anchor: font::TextAnchor::TopLeft,
-                color,
-                shadow: true,
-            };
+
+            let mut text_span = font::TextSpan::new(height, graphics_context.ui_font, color);
+
+            if let Some(system) = world.system(*system) {
+                let sec_color = sec_status_color(system.security_status).expand(1.0);
+                text_span
+                    .push(format!("{} (", line))
+                    .color(sec_color)
+                    .push(format!("{:.1}", system.security_status))
+                    .color(color)
+                    .push(")");
+            } else {
+                text_span.push(line);
+            }
+
+            let pos_span = graphics_context.font_cache.layout(
+                text_span,
+                font::TextAnchor::TopLeft,
+                math::v2(5.0, line_height),
+                true,
+            );
+
             line_height += height;
             first = false;
-            graphics_state.text_nodes.push(node);
+
+            if let Some(span) = pos_span {
+                pos_nodes.push(span);
+            }
         }
 
-        if stats_strings.len() > 0 {
+        if let Some(system) = user_state.selected_system.and_then(|id| world.system(id)) {
             let mut line_height = 10.0;
-            let mut first = true;
-            for line in stats_strings {
-                let height = if first { 40.0 } else { 25.0 };
-                let node = TextNode {
-                    text: line,
-                    font: graphics_state.ui_font,
-                    scale: height,
-                    position: math::v2(window_size.x - 5.0, line_height),
-                    anchor: font::TextAnchor::TopRight,
-                    color: math::v4(1.0, 1.0, 1.0, 1.0),
-                    shadow: true,
-                };
+            let height = 40.0;
+            let color = math::V4::fill(1.0);
+            let sec_color = sec_status_color(system.security_status).expand(1.0);
+            let mut text_span = font::TextSpan::new(height, graphics_context.ui_font, color);
+            text_span
+                .push(format!("{} (", system.name))
+                .color(sec_color)
+                .push(format!("{:.2}", system.security_status))
+                .color(color)
+                .push(")");
+            let text_span = graphics_context.font_cache.layout(
+                text_span,
+                font::TextAnchor::TopRight,
+                math::v2(window_size.x - 5.0, line_height),
+                true,
+            );
+            if let Some(span) = text_span {
+                pos_nodes.push(span);
+            }
+            line_height += height;
+
+            let height = 25.0;
+            let sov = world.sov_standing(system.system_id);
+            if let Some(sov) = sov {
+                if let Some(alliance) = sov.alliance_id.and_then(|id| world.alliance(id)) {
+                    let mut text_span =
+                        font::TextSpan::new(height, graphics_context.ui_font, color);
+                    text_span.push(format!("{} [{}]", alliance.name, alliance.ticker));
+                    let text_span = graphics_context.font_cache.layout(
+                        text_span,
+                        font::TextAnchor::TopRight,
+                        math::v2(window_size.x - 5.0, line_height),
+                        true,
+                    );
+                    if let Some(span) = text_span {
+                        pos_nodes.push(span);
+                    }
+                    line_height += height;
+                }
+                if let Some(corporation) = sov.corporation_id.and_then(|id| world.corporation(id)) {
+                    let mut text_span =
+                        font::TextSpan::new(height, graphics_context.ui_font, color);
+                    text_span.push(format!("{} [{}]", corporation.name, corporation.ticker));
+                    let text_span = graphics_context.font_cache.layout(
+                        text_span,
+                        font::TextAnchor::TopRight,
+                        math::v2(window_size.x - 5.0, line_height),
+                        true,
+                    );
+                    if let Some(span) = text_span {
+                        pos_nodes.push(span);
+                    }
+                    line_height += height;
+                }
+            }
+
+            let stats = world.stats(system.system_id);
+            if let Some(stats) = stats {
+                let mut text_span = font::TextSpan::new(height, graphics_context.ui_font, color);
+                text_span.push(format!(
+                    "Ship Kills: {} Pod Kills: {}",
+                    stats.ship_kills, stats.pod_kills
+                ));
+                let text_span = graphics_context.font_cache.layout(
+                    text_span,
+                    font::TextAnchor::TopRight,
+                    math::v2(window_size.x - 5.0, line_height),
+                    true,
+                );
+                if let Some(span) = text_span {
+                    pos_nodes.push(span);
+                }
                 line_height += height;
-                first = false;
-                graphics_state.text_nodes.push(node);
+
+                let mut text_span = font::TextSpan::new(height, graphics_context.ui_font, color);
+                text_span.push(format!(
+                    "Jumps: {} NPC Kills: {}",
+                    stats.jumps, stats.npc_kills
+                ));
+                let text_span = graphics_context.font_cache.layout(
+                    text_span,
+                    font::TextAnchor::TopRight,
+                    math::v2(window_size.x - 5.0, line_height),
+                    true,
+                );
+                if let Some(span) = text_span {
+                    pos_nodes.push(span);
+                }
             }
         }
 
         if user_state.query_string.len() > 0 {
-            let node = TextNode {
-                text: user_state.query_string.clone(),
-                font: graphics_state.ui_font,
-                scale: 30.0,
-                position: math::v2(5.0, window_size.y - 30.0),
-                anchor: font::TextAnchor::TopLeft,
-                color: math::V4::fill(1.0),
-                shadow: true,
-            };
-
-            graphics_state.text_nodes.push(node);
+            let mut text_span =
+                font::TextSpan::new(30.0, graphics_context.ui_font, math::V4::fill(1.0));
+            text_span.push(user_state.query_string.as_str());
+            let text_span = graphics_context.font_cache.layout(
+                text_span,
+                font::TextAnchor::TopLeft,
+                math::v2(5.0, window_size.y - 30.0),
+                true,
+            );
+            if let Some(span) = text_span {
+                pos_nodes.push(span);
+            }
         }
 
-        if graphics_state.text_nodes.len() > 0 {
-            let font_atlas_sampler = graphics_state
-                .font_cache
-                .texture()
-                .sampled()
-                .magnify_filter(glium::uniforms::MagnifySamplerFilter::Nearest)
-                .minify_filter(glium::uniforms::MinifySamplerFilter::Nearest);
-
+        if pos_nodes.len() > 0 {
             let uniforms = glium::uniform! {
                 window_size: window_size,
-                font_atlas: font_atlas_sampler
+                font_atlas: graphics_context.font_cache.sampler()
             };
 
             let draw_params = glium::DrawParameters {
@@ -461,21 +512,11 @@ impl Window {
             };
 
             let mut text_buf = Vec::new();
-            for text in graphics_state.text_nodes.drain(..) {
-                graphics_state
+
+            for text in pos_nodes {
+                graphics_context
                     .font_cache
-                    .prepare(
-                        text.font,
-                        text.text.as_str(),
-                        &mut text_buf,
-                        text.scale,
-                        text.anchor,
-                        text.position,
-                        text.color,
-                        window_size,
-                        text.shadow,
-                    )
-                    .unwrap();
+                    .draw(&text, &mut text_buf, window_size);
             }
 
             let text_data_buf =

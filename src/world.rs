@@ -71,6 +71,13 @@ pub struct Stats {
     pub jumps: i32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Sov {
+    pub alliance_id: Option<i32>,
+    pub corporation_id: Option<i32>,
+    pub standing: f64,
+}
+
 pub struct World {
     systems: HashMap<i32, esi::GetUniverseSystem>,
     systems_by_name: HashMap<String, i32>,
@@ -83,7 +90,9 @@ pub struct World {
     route_text: Vec<(i32, String)>,
     system_stats: Arc<RwLock<HashMap<i32, Stats>>>,
     player_system: Arc<RwLock<Option<i32>>>,
-    sov: Arc<RwLock<HashMap<i32, f64>>>,
+    sov: Arc<RwLock<HashMap<i32, Sov>>>,
+    alliances: Arc<RwLock<HashMap<i32, esi::GetAlliance>>>,
+    corporations: Arc<RwLock<HashMap<i32, esi::GetCorporation>>>,
     event_proxy: EventLoopProxy<UserEvent>,
 }
 
@@ -102,6 +111,8 @@ impl World {
             system_stats: Arc::new(RwLock::new(HashMap::new())),
             player_system: Arc::new(RwLock::new(None)),
             sov: Arc::new(RwLock::new(HashMap::new())),
+            alliances: Arc::new(RwLock::new(HashMap::new())),
+            corporations: Arc::new(RwLock::new(HashMap::new())),
             event_proxy,
         }
     }
@@ -110,7 +121,7 @@ impl World {
         self.systems.values()
     }
 
-    fn system(&self, system_id: i32) -> Option<&esi::GetUniverseSystem> {
+    pub fn system(&self, system_id: i32) -> Option<&esi::GetUniverseSystem> {
         self.systems.get(&system_id)
     }
 
@@ -130,6 +141,18 @@ impl World {
 
     pub fn constellation(&self, constellation_id: i32) -> Option<&esi::GetUniverseConstellation> {
         self.constellations.get(&constellation_id)
+    }
+
+    pub fn alliance(&self, alliance_id: i32) -> Option<esi::GetAlliance> {
+        self.alliances.read().unwrap().get(&alliance_id).cloned()
+    }
+
+    pub fn corporation(&self, corporation_id: i32) -> Option<esi::GetCorporation> {
+        self.corporations
+            .read()
+            .unwrap()
+            .get(&corporation_id)
+            .cloned()
     }
 
     fn push_system(&mut self, system: esi::GetUniverseSystem) {
@@ -332,7 +355,9 @@ impl World {
     }
 
     pub async fn load_sov_standings(
-        sov_standings: &Arc<RwLock<HashMap<i32, f64>>>,
+        sov_standings: &Arc<RwLock<HashMap<i32, Sov>>>,
+        alliances: &Arc<RwLock<HashMap<i32, esi::GetAlliance>>>,
+        corporations: &Arc<RwLock<HashMap<i32, esi::GetCorporation>>>,
         client: &esi::Client,
     ) {
         use tokio::sync::RwLock;
@@ -455,13 +480,18 @@ impl World {
             sov.clear();
         }
 
+        let mut alliance_ids = Vec::new();
+        let mut corporation_ids = Vec::new();
+
         for system in sov_map {
             let alliance = if let Some(alliance_id) = system.alliance_id {
+                alliance_ids.push(alliance_id);
                 alliance_standings.read().await.get(&alliance_id).cloned()
             } else {
                 None
             };
             let corporation = if let Some(corporation_id) = system.corporation_id {
+                corporation_ids.push(corporation_id);
                 corporation_standings
                     .read()
                     .await
@@ -473,10 +503,53 @@ impl World {
 
             if let Some(standing) = alliance.or(corporation) {
                 let mut sov = sov_standings.write().unwrap();
-                sov.insert(system.system_id, standing);
+                sov.insert(
+                    system.system_id,
+                    Sov {
+                        alliance_id: system.alliance_id,
+                        corporation_id: system.corporation_id,
+                        standing,
+                    },
+                );
             } else if system.alliance_id.is_some() || system.corporation_id.is_some() {
                 let mut sov = sov_standings.write().unwrap();
-                sov.insert(system.system_id, 0.0);
+                sov.insert(
+                    system.system_id,
+                    Sov {
+                        alliance_id: system.alliance_id,
+                        corporation_id: system.corporation_id,
+                        standing: 0.0,
+                    },
+                );
+            }
+        }
+
+        let alliances_fut: FuturesUnordered<_> = alliance_ids
+            .iter()
+            .map(|alliance_id| client.get_alliance(*alliance_id))
+            .collect();
+
+        let corporations_fut: FuturesUnordered<_> = corporation_ids
+            .iter()
+            .map(|corporation_id| client.get_corporation(*corporation_id))
+            .collect();
+
+        let (alliance_res, corporation_res): (Vec<_>, Vec<_>) = futures::join!(
+            alliances_fut.map(Result::unwrap).collect(),
+            corporations_fut.map(Result::unwrap).collect()
+        );
+
+        {
+            let mut alls = alliances.write().unwrap();
+            for alliance in alliance_res {
+                alls.insert(alliance.alliance_id, alliance);
+            }
+        }
+
+        {
+            let mut corps = corporations.write().unwrap();
+            for corporation in corporation_res {
+                corps.insert(corporation.corporation_id, corporation);
             }
         }
     }
@@ -758,6 +831,8 @@ impl World {
         let player_system = self.player_system.clone();
         let system_stats = self.system_stats.clone();
         let sov_standings = self.sov.clone();
+        let alliances = self.alliances.clone();
+        let corporations = self.corporations.clone();
         tokio::spawn(async move {
             let mut counter = 0;
             let poll_interval = 10;
@@ -778,7 +853,8 @@ impl World {
                 }
                 if counter % 300 == 0 {
                     World::load_system_stats(&system_stats, &client).await;
-                    World::load_sov_standings(&sov_standings, &client).await;
+                    World::load_sov_standings(&sov_standings, &alliances, &corporations, &client)
+                        .await;
                     let _ = event_proxy
                         .send_event(UserEvent::DataEvent(DataEvent::SovStandingsChanged));
                     let _ =
@@ -790,7 +866,7 @@ impl World {
         });
     }
 
-    pub fn sov_standing(&self, system: i32) -> Option<f64> {
+    pub fn sov_standing(&self, system: i32) -> Option<Sov> {
         let sov = self.sov.read().unwrap();
         sov.get(&system).cloned()
     }

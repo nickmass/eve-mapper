@@ -1,6 +1,6 @@
 use reqwest::{header, Response, Url};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 use std::sync::Arc;
 
@@ -28,6 +28,7 @@ pub struct Client {
     client: reqwest::Client,
     profile: Arc<RwLock<Profile>>,
     cache: Arc<Cache>,
+    limiter: Arc<Semaphore>,
 }
 
 #[derive(Debug)]
@@ -69,6 +70,7 @@ impl Client {
             client: reqwest::Client::new(),
             profile: Arc::new(RwLock::new(profile)),
             cache,
+            limiter: Arc::new(Semaphore::new(5)),
         }
     }
 
@@ -141,17 +143,21 @@ impl Client {
 
         while retry_count < 5 {
             let this_request = request.try_clone().ok_or(Error::CannotCloneRequest)?;
-            let request_start = std::time::Instant::now();
-            log::info!("esi request {}: {}", uuid, url);
-            let response = self
-                .client
-                .execute(this_request)
-                .await
-                .map_err(Error::CannotExecuteRequest)?;
+            log::info!("request {}: {}", uuid, url);
+            let (response, request_start) = {
+                let _permit = self.limiter.acquire().await;
+                let start = std::time::Instant::now();
+                let response = self
+                    .client
+                    .execute(this_request)
+                    .await
+                    .map_err(Error::CannotExecuteRequest)?;
+                (response, start)
+            };
 
             let status_code = response.status().as_u16();
             log::info!(
-                "esi response {}: {} after {}ms",
+                "response {}: {} after {}ms",
                 status_code,
                 uuid,
                 request_start.elapsed().as_millis()
@@ -171,13 +177,13 @@ impl Client {
             let expires = response.headers().get(header::EXPIRES).cloned();
 
             if reauth {
-                log::info!("esi refreshing authentication token {}", uuid);
+                log::info!("refreshing authentication token {}", uuid);
                 let reauth_start = std::time::Instant::now();
                 let mut profile = self.profile.write().await;
                 if let Ok(new_profile) = oauth::refresh(profile.clone()).await {
                     *profile = new_profile;
                     log::info!(
-                        "esi refreshed authentication token {} after {}ms",
+                        "refreshed authentication token {} after {}ms",
                         uuid,
                         reauth_start.elapsed().as_millis()
                     );
@@ -202,11 +208,7 @@ impl Client {
                     .parse::<u64>()
                     .map_err(|_| Error::InvalidEsiLimitHeader(format!("{:?}", limit.as_bytes())))?
                     * 1000;
-                log::warn!(
-                    "esi error limit header found {} delaying for {}ms",
-                    uuid,
-                    dur
-                );
+                log::warn!("error limit header found {} delaying for {}ms", uuid, dur);
                 tokio::time::delay_for(std::time::Duration::from_millis(dur)).await;
             }
 
@@ -241,7 +243,7 @@ impl Client {
                     }
                 } else {
                     log::warn!(
-                        "Invalid or missing expires header, skipping cache {}: {:?}",
+                        "invalid or missing expires header, skipping cache {}: {:?}",
                         uuid,
                         expires
                     );
@@ -249,14 +251,10 @@ impl Client {
                 return Ok(value);
             }
             retry_count += 1;
-            log::error!(
-                "esi request failed {} retrying attempt {}",
-                uuid,
-                retry_count
-            );
+            log::error!("request failed {} retrying attempt {}", uuid, retry_count);
         }
 
-        log::error!("esi retries exahusted {}", uuid);
+        log::error!("retries exahusted {}", uuid);
         Err(Error::RetriesExhausted)
     }
 }
@@ -327,12 +325,20 @@ impl Client {
 
     pub async fn get_corporation(&self, corporation_id: i32) -> Result<GetCorporation, Error> {
         let url = format!("corporations/{}/", corporation_id);
-        self.get(&url).await
+        let mut res: Result<GetCorporation, _> = self.get(&url).await;
+        if let Ok(res) = res.as_mut() {
+            res.corporation_id = corporation_id;
+        }
+        res
     }
 
     pub async fn get_alliance(&self, alliance_id: i32) -> Result<GetAlliance, Error> {
         let url = format!("alliances/{}/", alliance_id);
-        self.get(&url).await
+        let mut res: Result<GetAlliance, _> = self.get(&url).await;
+        if let Ok(res) = res.as_mut() {
+            res.alliance_id = alliance_id;
+        }
+        res
     }
 
     pub async fn get_alliance_contacts(
@@ -490,6 +496,8 @@ pub struct GetCharacter {
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetCorporation {
+    #[serde(default)]
+    pub corporation_id: i32,
     pub alliance_id: Option<i32>,
     pub name: String,
     pub ticker: String,
@@ -497,6 +505,8 @@ pub struct GetCorporation {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetAlliance {
+    #[serde(default)]
+    pub alliance_id: i32,
     pub name: String,
     pub ticker: String,
 }
