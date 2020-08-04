@@ -4,4 +4,5 @@ local-cache
 eve-profile.json
 eve-static.dat
 eve-dynamic.dat
+eve-images.dat
 bridges.tsv

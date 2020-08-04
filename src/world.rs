@@ -4,6 +4,8 @@ use futures::stream::StreamExt;
 use glium::glutin::event_loop::EventLoopProxy;
 use petgraph::Graph;
 
+use tokio::sync::mpsc;
+
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, RwLock};
@@ -78,6 +80,17 @@ pub struct Sov {
     pub standing: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RouteNode {
+    pub arrive_jump: Option<JumpType>,
+    pub leave_jump: Option<JumpType>,
+    pub system_id: i32,
+}
+
+enum UpdateRequest {
+    AllianceLogo(i32),
+}
+
 pub struct World {
     systems: HashMap<i32, esi::GetUniverseSystem>,
     systems_by_name: HashMap<String, i32>,
@@ -87,13 +100,15 @@ pub struct World {
     graph: Graph<Node, Edge, petgraph::Undirected, u32>,
     route: Vec<i32>,
     route_target: Option<(i32, i32)>,
-    route_text: Vec<(i32, String)>,
+    route_nodes: Vec<RouteNode>,
     system_stats: Arc<RwLock<HashMap<i32, Stats>>>,
     player_system: Arc<RwLock<Option<i32>>>,
     sov: Arc<RwLock<HashMap<i32, Sov>>>,
     alliances: Arc<RwLock<HashMap<i32, esi::GetAlliance>>>,
     corporations: Arc<RwLock<HashMap<i32, esi::GetCorporation>>>,
+    alliance_logos: Arc<RwLock<HashMap<i32, Arc<Vec<u8>>>>>,
     event_proxy: EventLoopProxy<UserEvent>,
+    update_sender: Option<mpsc::UnboundedSender<UpdateRequest>>,
 }
 
 impl World {
@@ -107,13 +122,15 @@ impl World {
             graph: Graph::new_undirected(),
             route: Vec::new(),
             route_target: None,
-            route_text: Vec::new(),
+            route_nodes: Vec::new(),
             system_stats: Arc::new(RwLock::new(HashMap::new())),
             player_system: Arc::new(RwLock::new(None)),
             sov: Arc::new(RwLock::new(HashMap::new())),
             alliances: Arc::new(RwLock::new(HashMap::new())),
             corporations: Arc::new(RwLock::new(HashMap::new())),
+            alliance_logos: Arc::new(RwLock::new(HashMap::new())),
             event_proxy,
+            update_sender: None,
         }
     }
 
@@ -153,6 +170,23 @@ impl World {
             .unwrap()
             .get(&corporation_id)
             .cloned()
+    }
+
+    pub fn alliance_logo(&self, alliance_id: i32) -> Option<Arc<Vec<u8>>> {
+        let logo = self
+            .alliance_logos
+            .read()
+            .unwrap()
+            .get(&alliance_id)
+            .cloned();
+        if logo.is_some() {
+            logo
+        } else {
+            if let Some(sender) = self.update_sender.as_ref() {
+                let _ = sender.send(UpdateRequest::AllianceLogo(alliance_id));
+            }
+            None
+        }
     }
 
     fn push_system(&mut self, system: esi::GetUniverseSystem) {
@@ -211,35 +245,11 @@ impl World {
         )
         .unwrap();
 
-        let mut jump_count = 0;
-
         let mut route_systems = Vec::new();
-        let mut route_text = Vec::new();
-
-        let from_system = self.system(self.route_target.unwrap().0).unwrap();
-        let to_system = self.system(self.route_target.unwrap().1).unwrap();
-
-        let from_const = self
-            .constellations
-            .get(&from_system.constellation_id)
-            .unwrap();
-        let from_region = self.regions.get(&from_const.region_id).unwrap();
-
-        let to_const = self
-            .constellations
-            .get(&to_system.constellation_id)
-            .unwrap();
-        let to_region = self.regions.get(&to_const.region_id).unwrap();
-
-        route_text.push((
-            0,
-            format!(
-                "{} ({}) :: {} ({})",
-                from_system.name, from_region.name, to_system.name, to_region.name
-            ),
-        ));
+        let mut route_nodes = Vec::new();
 
         let mut visited = HashSet::new();
+        let mut arrive_gate = None;
         for gate in route.1 {
             let node = self.graph[gate];
             match node {
@@ -256,37 +266,61 @@ impl World {
                     let gate = self.stargates.get(&stargate).unwrap();
                     visited.insert(source);
                     if !visited.contains(&destination) {
-                        let system = self.system(source).unwrap();
-                        let stats = self.stats(gate.system_id).unwrap();
-                        route_text.push((
-                            system.system_id,
-                            format!(
-                                "{}: {} - n{}.s{}.p{}.j{}",
-                                system.name,
-                                gate.name,
-                                stats.npc_kills,
-                                stats.ship_kills,
-                                stats.pod_kills,
-                                stats.jumps
-                            ),
-                        ));
-                        route_systems.push(system.system_id);
-                        jump_count += 1;
+                        let source = self.system(source).unwrap();
+                        let dest = self.system(destination).unwrap();
+                        let source_const = self.constellation(source.constellation_id);
+                        let dest_const = self.constellation(dest.constellation_id);
+
+                        route_systems.push(source.system_id);
+                        let leave_gate = match node {
+                            Node::JumpGate { .. } => Some(JumpType::JumpGate),
+                            Node::Stargate { .. } => {
+                                if source.constellation_id == dest.constellation_id {
+                                    Some(JumpType::System)
+                                } else if source_const.map(|c| c.region_id)
+                                    == dest_const.map(|c| c.region_id)
+                                {
+                                    Some(JumpType::Constellation)
+                                } else {
+                                    Some(JumpType::Region)
+                                }
+                            }
+                            _ => None,
+                        };
+
+                        route_nodes.push(RouteNode {
+                            system_id: gate.system_id,
+                            arrive_jump: arrive_gate,
+                            leave_jump: leave_gate,
+                        });
+
+                        arrive_gate = leave_gate;
                     }
                 }
                 Node::System { .. } => (),
             }
         }
+        route_nodes.push(RouteNode {
+            system_id: to,
+            arrive_jump: arrive_gate,
+            leave_jump: None,
+        });
         route_systems.push(to);
 
-        route_text.push((0, format!("{} Jumps", jump_count)));
-
         self.route = route_systems;
-        self.route_text = route_text;
+        self.route_nodes = route_nodes;
     }
 
     pub fn is_on_route(&self, system_id: i32) -> bool {
         self.route.iter().any(|&r| r == system_id)
+    }
+
+    pub fn route_nodes(&self) -> &[RouteNode] {
+        self.route_nodes.as_slice()
+    }
+
+    pub fn route_target(&self) -> Option<(i32, i32)> {
+        self.route_target
     }
 
     pub fn jumps(&self) -> Vec<Jump> {
@@ -348,10 +382,6 @@ impl World {
                 }
             })
             .collect()
-    }
-
-    pub fn route_text(&self) -> &[(i32, String)] {
-        &self.route_text
     }
 
     pub async fn load_sov_standings(
@@ -821,18 +851,46 @@ impl World {
                 .add_edge(left_node_id.clone(), right_node_id.clone(), edge);
         }
 
-        self.spawn_background_updater(client.clone());
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.update_sender = Some(tx);
+        self.spawn_background_updater(client.clone(), rx);
 
         Ok(())
     }
 
-    fn spawn_background_updater(&self, client: esi::Client) {
+    fn spawn_background_updater(
+        &self,
+        client: esi::Client,
+        mut update_receiver: mpsc::UnboundedReceiver<UpdateRequest>,
+    ) {
         let event_proxy = self.event_proxy.clone();
         let player_system = self.player_system.clone();
         let system_stats = self.system_stats.clone();
         let sov_standings = self.sov.clone();
         let alliances = self.alliances.clone();
         let corporations = self.corporations.clone();
+
+        let alliance_logos = self.alliance_logos.clone();
+        tokio::spawn({
+            let client = client.clone();
+            let event_proxy = event_proxy.clone();
+            async move {
+                loop {
+                    let update = update_receiver.next().await;
+                    match update {
+                        Some(UpdateRequest::AllianceLogo(alliance_id)) => {
+                            let logo = client.get_alliance_logo(alliance_id, 256).await.unwrap();
+                            let logo = Arc::new(logo);
+
+                            alliance_logos.write().unwrap().insert(alliance_id, logo);
+                            let _ = event_proxy
+                                .send_event(UserEvent::DataEvent(DataEvent::ImageLoaded));
+                        }
+                        None => break,
+                    }
+                }
+            }
+        });
         tokio::spawn(async move {
             let mut counter = 0;
             let poll_interval = 10;

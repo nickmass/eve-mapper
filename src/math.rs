@@ -457,7 +457,7 @@ pub struct Rect<T> {
     pub max: V2<T>,
 }
 
-impl<T: Sub<Output = T> + Num + Clone + Copy> Rect<T> {
+impl<T: Sub<Output = T> + Num + Clone + Copy + PartialOrd> Rect<T> {
     pub fn new(min: V2<T>, max: V2<T>) -> Self {
         Rect {
             min: V2::new(min.x.min(max.x), min.y.min(max.y)),
@@ -473,6 +473,10 @@ impl<T: Sub<Output = T> + Num + Clone + Copy> Rect<T> {
         self.max.y - self.min.y
     }
 
+    pub fn contains(&self, point: V2<T>) -> bool {
+        self.min.x < point.x && self.max.x > point.x && self.min.y < point.y && self.max.y > point.y
+    }
+
     pub fn triangle_list_iter(&self) -> TriangleListIter<T> {
         TriangleListIter {
             arr: [
@@ -485,6 +489,12 @@ impl<T: Sub<Output = T> + Num + Clone + Copy> Rect<T> {
             ],
             index: 0,
         }
+    }
+}
+
+impl Rect<i32> {
+    pub fn as_f32(&self) -> Rect<f32> {
+        Rect::new(self.min.as_f32(), self.max.as_f32())
     }
 }
 

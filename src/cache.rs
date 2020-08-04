@@ -28,9 +28,21 @@ impl Expiry for CheckExpiry {
     }
 }
 
+struct MonthExpiry;
+impl Expiry for MonthExpiry {
+    fn is_expired(expires: u64) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(u64::MAX);
+        now > (expires + (60 * 60 * 24 * 30))
+    }
+}
+
 pub struct Cache {
     static_store: Store<NeverExpires>,
     dynamic_store: Store<CheckExpiry>,
+    image_store: Store<MonthExpiry>,
 }
 
 struct Store<T: Expiry> {
@@ -44,6 +56,7 @@ struct Store<T: Expiry> {
 struct Entry {
     expires: u64,
     etag: Option<String>,
+    #[serde(with = "serde_bytes")]
     data: Vec<u8>,
 }
 
@@ -51,6 +64,7 @@ struct Entry {
 pub enum CacheKind {
     Static,
     Dynamic,
+    Image,
 }
 
 #[derive(Debug, Clone)]
@@ -67,19 +81,23 @@ pub enum Error {
 }
 
 impl Cache {
-    pub async fn new<S: AsRef<Path>, D: AsRef<Path>>(
+    pub async fn new<S: AsRef<Path>, D: AsRef<Path>, I: AsRef<Path>>(
         static_store: S,
         dynamic_store: D,
+        image_store: I,
     ) -> Result<Cache, Error> {
         let static_path = static_store.as_ref();
         let dynamic_path = dynamic_store.as_ref();
+        let image_path = image_store.as_ref();
 
         let static_store = Store::load(static_path).await?;
         let dynamic_store = Store::load(dynamic_path).await?;
+        let image_store = Store::load(image_path).await?;
 
         Ok(Cache {
             static_store,
             dynamic_store,
+            image_store,
         })
     }
 
@@ -91,6 +109,7 @@ impl Cache {
         match kind {
             CacheKind::Static => self.static_store.get(key).await,
             CacheKind::Dynamic => self.dynamic_store.get(key).await,
+            CacheKind::Image => self.image_store.get(key).await,
         }
     }
 
@@ -109,12 +128,14 @@ impl Cache {
         match kind {
             CacheKind::Static => self.static_store.store(key, value, etag, expires).await,
             CacheKind::Dynamic => self.dynamic_store.store(key, value, etag, expires).await,
+            CacheKind::Image => self.image_store.store(key, value, etag, expires).await,
         }
     }
 
     pub async fn save(&self) -> Result<(), Error> {
         self.static_store.save().await?;
         self.dynamic_store.save().await?;
+        self.image_store.save().await?;
 
         Ok(())
     }
@@ -129,6 +150,8 @@ impl<E: Expiry> Store<E> {
         } else {
             HashMap::new()
         };
+
+        log::info!("loaded cache {}, {} entries", path.display(), entries.len());
 
         Ok(Store {
             path: path.to_owned(),

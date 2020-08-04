@@ -79,6 +79,24 @@ impl ShaderCollection {
                 path: String::from("shaders/text_frag.glsl"),
             },
         );
+        shaders.insert(
+            "quad_vert",
+            Shader {
+                source: String::from_utf8(include_bytes!("../shaders/quad_vert.glsl").to_vec())
+                    .unwrap(),
+                version: 0,
+                path: String::from("shaders/quad_vert.glsl"),
+            },
+        );
+        shaders.insert(
+            "quad_frag",
+            Shader {
+                source: String::from_utf8(include_bytes!("../shaders/quad_frag.glsl").to_vec())
+                    .unwrap(),
+                version: 0,
+                path: String::from("shaders/quad_frag.glsl"),
+            },
+        );
 
         let (tx, rx) = channel();
         let mut watcher = notify::watcher(tx, std::time::Duration::from_millis(100)).unwrap();

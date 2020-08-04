@@ -4,24 +4,31 @@ use glutin::event::{Event, MouseButton, VirtualKeyCode};
 use glutin::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use glutin::window::WindowBuilder;
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use crate::error::*;
 use crate::font;
 use crate::math;
 use crate::shaders;
 use crate::world::{JumpType, World};
 
+mod images;
+
 mod map;
 use map::Map;
+
+mod info;
+use info::InfoBox;
+
+mod route;
+use route::RouteBox;
 
 #[derive(Clone, Debug)]
 pub enum UserEvent {
     DataEvent(DataEvent),
     MapEvent(MapEvent),
     QueryEvent(QueryEvent),
+    RouteEvent(RouteEvent),
     FrameDrawn,
 }
 
@@ -30,10 +37,16 @@ pub enum DataEvent {
     CharacterLocationChanged(Option<i32>),
     SovStandingsChanged,
     SystemStatsChanged,
+    ImageLoaded,
 }
 
 #[derive(Clone, Debug)]
 pub enum MapEvent {
+    SelectedSystemChanged(Option<i32>),
+}
+
+#[derive(Clone, Debug)]
+pub enum RouteEvent {
     SelectedSystemChanged(Option<i32>),
 }
 
@@ -52,14 +65,15 @@ pub struct Window {
 
 struct UserState {
     query_string: String,
-    selected_system: Option<i32>,
 }
 
 pub struct GraphicsContext {
     pub display: glium::Display,
     pub ui_font: font::FontId,
     pub title_font: font::FontId,
+    pub symbol_font: font::FontId,
     pub font_cache: font::FontCache,
+    pub images: images::Images,
 }
 
 impl GraphicsContext {
@@ -73,6 +87,7 @@ struct GraphicsState {
     system_program: glium::Program,
     jump_program: glium::Program,
     text_program: glium::Program,
+    quad_program: glium::Program,
     shader_collection: shaders::ShaderCollection,
     shader_version: usize,
 }
@@ -117,6 +132,9 @@ impl Window {
         let text_vert = shader_collection.get("text_vert").unwrap();
         let text_frag = shader_collection.get("text_frag").unwrap();
 
+        let quad_vert = shader_collection.get("quad_vert").unwrap();
+        let quad_frag = shader_collection.get("quad_frag").unwrap();
+
         let system_program =
             glium::Program::from_source(&display, &systems_vert, &systems_frag, None).unwrap();
 
@@ -126,17 +144,24 @@ impl Window {
         let text_program =
             glium::Program::from_source(&display, &text_vert, &text_frag, None).unwrap();
 
-        let mut font_cache = font::FontCache::new(&display, 1024 * 4, 1024 * 4);
+        let quad_program =
+            glium::Program::from_source(&display, &quad_vert, &quad_frag, None).unwrap();
+
+        let mut font_cache = font::FontCache::new(&display, 1024, 1024);
         let ui_font = font_cache.load("evesans", font::EVE_SANS_NEUE).unwrap();
         let title_font = font_cache
             .load("evesans-bold", font::EVE_SANS_NEUE_BOLD)
             .unwrap();
+        let symbol_font = font_cache.load("nanumgothic", font::NANUMGOTHIC).unwrap();
+
+        let images = images::Images::new(&display, 4096, 4096);
 
         let graphics_state = GraphicsState {
             circle_model,
             system_program,
             jump_program,
             text_program,
+            quad_program,
             shader_collection,
             shader_version,
         };
@@ -145,12 +170,13 @@ impl Window {
             display,
             ui_font,
             title_font,
+            symbol_font,
             font_cache,
+            images,
         };
 
         let user_state = UserState {
             query_string: String::new(),
-            selected_system: None,
         };
 
         Window {
@@ -187,9 +213,10 @@ impl Window {
 
         let mut input_state = InputState::new(event_proxy);
         let mut map = Map::new(&graphics_context);
+        let mut info_box = InfoBox::new(&graphics_context);
+        let mut route_box = RouteBox::new(&graphics_context);
         let mut frame_time = Instant::now();
         let mut render_time = Instant::now();
-        let mut frame_count = 0;
 
         self.event_loop.run(move |event, _window, control_flow| {
             use glutin::event::*;
@@ -205,6 +232,8 @@ impl Window {
                         graphics_context,
                         &mut user_state,
                     );
+                    info_box.update(dt, &input_state, &world);
+                    route_box.update(dt, &input_state, &world);
                     map.update(dt, &input_state, &world);
 
                     frame_time = Instant::now();
@@ -225,23 +254,22 @@ impl Window {
                     frame.clear_depth(0.0);
 
                     map.draw(&graphics_state, &mut frame);
+                    route_box.draw(&graphics_state, &mut frame);
+                    info_box.draw(&graphics_state, &mut frame);
                     Window::draw(
                         &mut frame,
                         &graphics_context,
                         &mut graphics_state,
                         &mut user_state,
                         &input_state,
-                        &mut world,
                     );
 
                     if let Err(e) = frame.finish() {
                         log::error!("gl swap buffer error: {:?}", e);
                     }
 
-                    frame_count += 1;
                     if render_time.elapsed().as_millis() > 1000 {
                         render_time = Instant::now();
-                        frame_count = 0;
                     }
 
                     //Send this event to ensure we run the updates for the next frame to continue any animations that may be ongoing
@@ -255,25 +283,12 @@ impl Window {
     }
 
     fn update(
-        dt: Duration,
+        _dt: Duration,
         input_state: &InputState,
         world: &mut World,
         graphics_context: &GraphicsContext,
         user_state: &mut UserState,
     ) {
-        for event in input_state.user_events() {
-            match event {
-                UserEvent::MapEvent(MapEvent::SelectedSystemChanged(system)) => {
-                    user_state.selected_system = system.clone();
-                    graphics_context.request_redraw();
-                }
-                UserEvent::DataEvent(DataEvent::SovStandingsChanged) => {
-                    graphics_context.request_redraw();
-                }
-                _ => (),
-            }
-        }
-
         if input_state.text().len() > 0 {
             user_state.query_string.push_str(input_state.text());
             graphics_context.request_redraw();
@@ -319,155 +334,9 @@ impl Window {
         graphics_state: &mut GraphicsState,
         user_state: &mut UserState,
         input_state: &InputState,
-        world: &mut World,
     ) {
-        let player_location = world.location();
         let window_size = input_state.window_size.as_f32();
-
-        let mut line_height = 10.0;
-        let mut first = true;
-        let mut player_on_route = if let Some(location) = player_location {
-            world.route_text().iter().any(|s| s.0 == location)
-        } else {
-            false
-        };
-
         let mut pos_nodes = Vec::new();
-
-        for (system, line) in world.route_text() {
-            let height = if first { 40.0 } else { 25.0 };
-            let color = if first {
-                math::V4::fill(1.0)
-            } else if Some(*system) == player_location {
-                player_on_route = false;
-                math::v4(0.0, 1.0, 1.0, 1.0)
-            } else if player_on_route {
-                math::v4(0.4, 0.4, 0.4, 1.0)
-            } else {
-                math::V4::fill(1.0)
-            };
-
-            let mut text_span = font::TextSpan::new(height, graphics_context.ui_font, color);
-
-            if let Some(system) = world.system(*system) {
-                let sec_color = sec_status_color(system.security_status).expand(1.0);
-                text_span
-                    .push(format!("{} (", line))
-                    .color(sec_color)
-                    .push(format!("{:.1}", system.security_status))
-                    .color(color)
-                    .push(")");
-            } else {
-                text_span.push(line);
-            }
-
-            let pos_span = graphics_context.font_cache.layout(
-                text_span,
-                font::TextAnchor::TopLeft,
-                math::v2(5.0, line_height),
-                true,
-            );
-
-            line_height += height;
-            first = false;
-
-            if let Some(span) = pos_span {
-                pos_nodes.push(span);
-            }
-        }
-
-        if let Some(system) = user_state.selected_system.and_then(|id| world.system(id)) {
-            let mut line_height = 10.0;
-            let height = 40.0;
-            let color = math::V4::fill(1.0);
-            let sec_color = sec_status_color(system.security_status).expand(1.0);
-            let mut text_span = font::TextSpan::new(height, graphics_context.ui_font, color);
-            text_span
-                .push(format!("{} (", system.name))
-                .color(sec_color)
-                .push(format!("{:.2}", system.security_status))
-                .color(color)
-                .push(")");
-            let text_span = graphics_context.font_cache.layout(
-                text_span,
-                font::TextAnchor::TopRight,
-                math::v2(window_size.x - 5.0, line_height),
-                true,
-            );
-            if let Some(span) = text_span {
-                pos_nodes.push(span);
-            }
-            line_height += height;
-
-            let height = 25.0;
-            let sov = world.sov_standing(system.system_id);
-            if let Some(sov) = sov {
-                if let Some(alliance) = sov.alliance_id.and_then(|id| world.alliance(id)) {
-                    let mut text_span =
-                        font::TextSpan::new(height, graphics_context.ui_font, color);
-                    text_span.push(format!("{} [{}]", alliance.name, alliance.ticker));
-                    let text_span = graphics_context.font_cache.layout(
-                        text_span,
-                        font::TextAnchor::TopRight,
-                        math::v2(window_size.x - 5.0, line_height),
-                        true,
-                    );
-                    if let Some(span) = text_span {
-                        pos_nodes.push(span);
-                    }
-                    line_height += height;
-                }
-                if let Some(corporation) = sov.corporation_id.and_then(|id| world.corporation(id)) {
-                    let mut text_span =
-                        font::TextSpan::new(height, graphics_context.ui_font, color);
-                    text_span.push(format!("{} [{}]", corporation.name, corporation.ticker));
-                    let text_span = graphics_context.font_cache.layout(
-                        text_span,
-                        font::TextAnchor::TopRight,
-                        math::v2(window_size.x - 5.0, line_height),
-                        true,
-                    );
-                    if let Some(span) = text_span {
-                        pos_nodes.push(span);
-                    }
-                    line_height += height;
-                }
-            }
-
-            let stats = world.stats(system.system_id);
-            if let Some(stats) = stats {
-                let mut text_span = font::TextSpan::new(height, graphics_context.ui_font, color);
-                text_span.push(format!(
-                    "Ship Kills: {} Pod Kills: {}",
-                    stats.ship_kills, stats.pod_kills
-                ));
-                let text_span = graphics_context.font_cache.layout(
-                    text_span,
-                    font::TextAnchor::TopRight,
-                    math::v2(window_size.x - 5.0, line_height),
-                    true,
-                );
-                if let Some(span) = text_span {
-                    pos_nodes.push(span);
-                }
-                line_height += height;
-
-                let mut text_span = font::TextSpan::new(height, graphics_context.ui_font, color);
-                text_span.push(format!(
-                    "Jumps: {} NPC Kills: {}",
-                    stats.jumps, stats.npc_kills
-                ));
-                let text_span = graphics_context.font_cache.layout(
-                    text_span,
-                    font::TextAnchor::TopRight,
-                    math::v2(window_size.x - 5.0, line_height),
-                    true,
-                );
-                if let Some(span) = text_span {
-                    pos_nodes.push(span);
-                }
-            }
-        }
 
         if user_state.query_string.len() > 0 {
             let mut text_span =
@@ -479,9 +348,7 @@ impl Window {
                 math::v2(5.0, window_size.y - 30.0),
                 true,
             );
-            if let Some(span) = text_span {
-                pos_nodes.push(span);
-            }
+            pos_nodes.push(text_span);
         }
 
         if pos_nodes.len() > 0 {
@@ -502,12 +369,6 @@ impl Window {
                     },
                     constant_value: (1.0, 1.0, 1.0, 1.0),
                 },
-                viewport: Some(glium::Rect {
-                    left: 0,
-                    bottom: 0,
-                    width: window_size.x as u32,
-                    height: window_size.y as u32,
-                }),
                 ..Default::default()
             };
 
@@ -551,6 +412,9 @@ impl Window {
             let text_vert = graphics_state.shader_collection.get("text_vert").unwrap();
             let text_frag = graphics_state.shader_collection.get("text_frag").unwrap();
 
+            let quad_vert = graphics_state.shader_collection.get("quad_vert").unwrap();
+            let quad_frag = graphics_state.shader_collection.get("quad_frag").unwrap();
+
             let systems_program = glium::Program::from_source(
                 &graphics_context.display,
                 &systems_vert,
@@ -572,6 +436,13 @@ impl Window {
                 None,
             );
 
+            let quad_program = glium::Program::from_source(
+                &graphics_context.display,
+                &quad_vert,
+                &quad_frag,
+                None,
+            );
+
             match systems_program {
                 Ok(program) => graphics_state.system_program = program,
                 Err(err) => log::error!("error creating systems shader: {:?}", err),
@@ -585,6 +456,11 @@ impl Window {
             match text_program {
                 Ok(program) => graphics_state.text_program = program,
                 Err(err) => log::error!("error creating text shader: {:?}", err),
+            }
+
+            match quad_program {
+                Ok(program) => graphics_state.quad_program = program,
+                Err(err) => log::error!("error creating quad shader: {:?}", err),
             }
 
             graphics_state.shader_version = new_version;
@@ -648,6 +524,14 @@ struct SystemData {
     radius: f32,
 }
 glium::implement_vertex!(SystemData, color, highlight, center, scale, radius);
+
+#[derive(Debug, Copy, Clone)]
+pub struct QuadVertex {
+    pub position: math::V2<f32>,
+    pub uv: math::V2<f32>,
+}
+
+glium::implement_vertex!(QuadVertex, position, uv);
 
 unsafe impl glium::vertex::Attribute for math::V2<f32> {
     fn get_type() -> glium::vertex::AttributeType {
@@ -718,7 +602,7 @@ impl glium::uniforms::AsUniformValue for math::M4<f32> {
     }
 }
 
-struct InputState {
+pub struct InputState {
     event_proxy: EventLoopProxy<UserEvent>,
     closed: bool,
     text: String,

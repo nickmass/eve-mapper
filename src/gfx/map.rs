@@ -123,7 +123,7 @@ impl<'a> Map<'a> {
 }
 
 impl<'a> Widget for Map<'a> {
-    fn update(&mut self, dt: Duration, input_state: &InputState, world: &World) {
+    fn update(&mut self, _dt: Duration, input_state: &InputState, world: &World) {
         for event in input_state.user_events() {
             match event {
                 UserEvent::DataEvent(DataEvent::CharacterLocationChanged(location)) => {
@@ -231,11 +231,20 @@ impl<'a> Widget for Map<'a> {
             let mut selected_system = None;
 
             if let Some(systems) = &self.map_systems {
+                let mut closest_match: Option<(f32, i32)> = None;
                 for system in systems.values() {
                     let position = (text_transform * system.position.expand(1.0)).collapse();
-                    if position.distance(&input_state.mouse_position) < self.current_zoom {
-                        selected_system = Some(system.system_id);
-                        break;
+                    let distance = position.distance(&input_state.mouse_position);
+
+                    if closest_match.map(|c| distance < c.0).unwrap_or(true) {
+                        closest_match = Some((distance, system.system_id));
+                    }
+                }
+
+                if let Some((distance, system_id)) = closest_match {
+                    let clamp_zoom = (self.current_zoom / 25.0).max(1.0).min(25.0) * 8.0;
+                    if distance < clamp_zoom {
+                        selected_system = Some(system_id);
                     }
                 }
             }
@@ -377,9 +386,7 @@ impl<'a> Widget for Map<'a> {
                             shadow,
                         );
 
-                        if let Some(span) = span {
-                            self.region_names.push(span);
-                        }
+                        self.region_names.push(span);
                     }
                 }
             }
@@ -419,9 +426,7 @@ impl<'a> Widget for Map<'a> {
                             true,
                         );
 
-                        if let Some(span) = span {
-                            self.system_names.push(span);
-                        }
+                        self.system_names.push(span);
                     }
                 }
             }

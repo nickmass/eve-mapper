@@ -12,12 +12,14 @@ pub const ALWAYS_CACHE: bool = false;
 #[derive(Copy, Clone, Debug)]
 enum EsiEndpoint {
     Latest,
+    Images,
 }
 
 impl EsiEndpoint {
     fn as_url_base(&self) -> Url {
         match *self {
             EsiEndpoint::Latest => Url::parse("https://esi.evetech.net/latest/").unwrap(),
+            EsiEndpoint::Images => Url::parse("https://images.evetech.net/").unwrap(),
         }
     }
 }
@@ -25,6 +27,7 @@ impl EsiEndpoint {
 #[derive(Clone)]
 pub struct Client {
     endpoint: EsiEndpoint,
+    image_endpoint: EsiEndpoint,
     client: reqwest::Client,
     profile: Arc<RwLock<Profile>>,
     cache: Arc<Cache>,
@@ -48,7 +51,7 @@ pub enum Error {
 impl Client {
     pub async fn new(profile: Profile) -> Client {
         let cache = Arc::new(
-            Cache::new("eve-static.dat", "eve-dynamic.dat")
+            Cache::new("eve-static.dat", "eve-dynamic.dat", "eve-images.dat")
                 .await
                 .unwrap(),
         );
@@ -67,6 +70,7 @@ impl Client {
         });
         Client {
             endpoint: EsiEndpoint::Latest,
+            image_endpoint: EsiEndpoint::Images,
             client: reqwest::Client::new(),
             profile: Arc::new(RwLock::new(profile)),
             cache,
@@ -78,33 +82,60 @@ impl Client {
         &self,
         path: S,
     ) -> Result<T, Error> {
-        self.execute_get(path, false, CacheKind::Static).await
+        self.execute_get(&self.endpoint, path, false, CacheKind::Static, |bytes| {
+            serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize)
+        })
+        .await
     }
 
     async fn get_no_cache<S: AsRef<str>, T: serde::de::DeserializeOwned + serde::Serialize>(
         &self,
         path: S,
     ) -> Result<T, Error> {
-        self.execute_get(path, false, CacheKind::Dynamic).await
+        self.execute_get(&self.endpoint, path, false, CacheKind::Dynamic, |bytes| {
+            serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize)
+        })
+        .await
     }
 
     async fn get_auth_no_cache<S: AsRef<str>, T: serde::de::DeserializeOwned + serde::Serialize>(
         &self,
         path: S,
     ) -> Result<T, Error> {
-        self.execute_get(path, true, CacheKind::Dynamic).await
+        self.execute_get(&self.endpoint, path, true, CacheKind::Dynamic, |bytes| {
+            serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize)
+        })
+        .await
     }
 
-    async fn execute_get<S: AsRef<str>, T: serde::de::DeserializeOwned + serde::Serialize>(
+    async fn get_image<S: AsRef<str>>(&self, path: S) -> Result<Vec<u8>, Error> {
+        let logo = self
+            .execute_get(
+                &self.image_endpoint,
+                path,
+                true,
+                CacheKind::Image,
+                |bytes| Ok(serde_bytes::ByteBuf::from(bytes)),
+            )
+            .await;
+        logo.map(serde_bytes::ByteBuf::into_vec)
+    }
+
+    async fn execute_get<
+        S: AsRef<str>,
+        F: Fn(&[u8]) -> Result<T, Error>,
+        T: serde::de::DeserializeOwned + serde::Serialize,
+    >(
         &self,
+        endpoint: &EsiEndpoint,
         path: S,
         auth: bool,
         cache_kind: CacheKind,
+        map_value: F,
     ) -> Result<T, Error> {
         let uuid = uuid::Uuid::new_v4();
         let path = path.as_ref();
-        let url = self
-            .endpoint
+        let url = endpoint
             .as_url_base()
             .join(path)
             .map_err(|e| Error::InvalidUrlPath(path.to_string(), e.into()))?;
@@ -216,7 +247,9 @@ impl Client {
                 let parsed_expires = expires
                     .as_ref()
                     .and_then(|v| v.to_str().map(String::from).ok())
-                    .and_then(|v| httpdate::parse_http_date(&v).ok());
+                    .and_then(|v| httpdate::parse_http_date(&v).ok())
+                    .or_else(|| parse_cache_control(&response));
+
                 let etag = parse_etag(&response);
 
                 let value = if let (Some(value), true) = (
@@ -229,7 +262,7 @@ impl Client {
                         .bytes()
                         .await
                         .map_err(Error::CannotRetrieveRequestBody)?;
-                    serde_json::from_slice(&bytes).map_err(Error::ResponseDeserialize)?
+                    map_value(&bytes)?
                 };
 
                 if let Some(expires) = parsed_expires {
@@ -372,6 +405,30 @@ impl Client {
         let url = format!("sovereignty/map/");
         self.get_no_cache(&url).await
     }
+
+    pub async fn get_alliance_logo(&self, alliance_id: i32, size: u32) -> Result<Vec<u8>, Error> {
+        let url = format!("alliances/{}/logo?size={}", alliance_id, size);
+        self.get_image(&url).await
+    }
+}
+
+fn parse_cache_control(response: &Response) -> Option<std::time::SystemTime> {
+    response
+        .headers()
+        .get(header::CACHE_CONTROL)
+        .and_then(|s| s.to_str().ok())
+        .map(str::trim)
+        .and_then(|s| {
+            if s.starts_with("max-age=") {
+                let index = "max-age=".len();
+                let seconds = s[index..].trim().parse::<u64>().ok()?;
+                Some(std::time::SystemTime::now() + std::time::Duration::from_secs(seconds))
+            } else if s == "no-cache" || s == "no-store" {
+                Some(std::time::SystemTime::now() - std::time::Duration::from_secs(1))
+            } else {
+                None
+            }
+        })
 }
 
 fn parse_etag(response: &Response) -> Option<String> {

@@ -5,7 +5,7 @@ use crate::math;
 
 pub const EVE_SANS_NEUE: &[u8] = include_bytes!("../fonts/evesansneue-regular.otf");
 pub const EVE_SANS_NEUE_BOLD: &[u8] = include_bytes!("../fonts/evesansneue-bold.otf");
-pub const TRIGLAVIAN: &[u8] = include_bytes!("../fonts/triglavian.ttf");
+pub const NANUMGOTHIC: &[u8] = include_bytes!("../fonts/nanumgothic.ttf");
 
 #[derive(Clone, Copy, Debug)]
 pub struct TextVertex {
@@ -26,8 +26,6 @@ impl From<FontId> for usize {
 
 pub struct FontCache {
     cache: RefCell<rusttype::gpu_cache::Cache<'static>>,
-    cache_width: u32,
-    cache_height: u32,
     cache_texture: glium::Texture2d,
     fonts: Vec<rusttype::Font<'static>>,
     font_ids: HashMap<&'static str, FontId>,
@@ -46,8 +44,6 @@ impl FontCache {
         FontCache {
             cache: RefCell::new(cache),
             cache_texture,
-            cache_width,
-            cache_height,
             fonts: Vec::new(),
             font_ids: HashMap::new(),
         }
@@ -87,7 +83,7 @@ impl FontCache {
         anchor: TextAnchor,
         position: math::V2<f32>,
         shadow: bool,
-    ) -> Option<PositionedTextSpan> {
+    ) -> PositionedTextSpan {
         let scale = rusttype::Scale::uniform(text.scale);
         let mut x_advance = position.x;
         let mut text_bounds: Option<math::Rect<_>> = None;
@@ -153,12 +149,15 @@ impl FontCache {
             }
         }
 
-        Some(PositionedTextSpan {
+        let bounds = text_bounds.unwrap_or(math::Rect::new(math::V2::fill(0), math::V2::fill(0)));
+        PositionedTextSpan {
             nodes: positioned_nodes,
-            bounds: text_bounds?,
+            bounds,
+            //wrong baseline
+            baseline: position.y,
             anchor,
             shadow,
-        })
+        }
     }
 
     pub fn draw(
@@ -250,9 +249,10 @@ impl FontCache {
 
 pub struct PositionedTextSpan {
     nodes: Vec<PositionedTextNode>,
-    bounds: math::Rect<i32>,
+    pub bounds: math::Rect<i32>,
     anchor: TextAnchor,
     shadow: bool,
+    pub baseline: f32,
 }
 
 pub struct PositionedTextNode {
