@@ -55,6 +55,7 @@ pub struct Map<'a> {
     player_location: Option<i32>,
     sov_vertexes: Option<Vec<SystemData>>,
     sov_vertex_buffer: Option<glium::VertexBuffer<SystemData>>,
+    distance_map: Option<(i32, HashMap<i32, u32>)>,
 }
 
 impl<'a> Map<'a> {
@@ -118,6 +119,7 @@ impl<'a> Map<'a> {
             player_location: None,
             sov_vertexes: None,
             sov_vertex_buffer: None,
+            distance_map: None,
         }
     }
 }
@@ -197,6 +199,35 @@ impl<'a> Widget for Map<'a> {
             text_dirty = true;
         }
 
+        let mut show_distance = false;
+        if let Some(system_id) = self.selected_system.or(self.player_location) {
+            if input_state
+                .pressed_keys
+                .contains(&super::VirtualKeyCode::LAlt)
+                || input_state
+                    .pressed_keys
+                    .contains(&super::VirtualKeyCode::RAlt)
+            {
+                if Some(system_id) != self.distance_map.as_ref().map(|(s, _d)| *s) {
+                    self.distance_map = Some((system_id, world.distances_from(system_id)));
+                }
+                show_distance = true;
+                text_dirty = true;
+                self.system_vertexes = None;
+            }
+        }
+
+        if input_state
+            .released_keys
+            .contains(&super::VirtualKeyCode::LAlt)
+            || input_state
+                .released_keys
+                .contains(&super::VirtualKeyCode::RAlt)
+        {
+            text_dirty = true;
+            self.system_vertexes = None;
+        }
+
         self.view_matrix = math::M3::<f32>::identity();
         self.view_matrix.c0.x = self.current_zoom;
         self.view_matrix.c1.y = self.current_zoom;
@@ -227,7 +258,7 @@ impl<'a> Widget for Map<'a> {
 
         let text_scale = self.window_size.y / 2160.0;
 
-        if input_state.mouse_move_delta() != math::V2::fill(0.0) {
+        if input_state.mouse_move_delta() != math::V2::fill(0.0) || text_dirty {
             let mut selected_system = None;
 
             if let Some(systems) = &self.map_systems {
@@ -419,6 +450,20 @@ impl<'a> Widget for Map<'a> {
                             font::TextSpan::new(scale, self.context.ui_font, color.expand(alpha));
                         span.push(&system.name);
 
+                        if show_distance {
+                            if let Some(distance) = self
+                                .distance_map
+                                .as_ref()
+                                .and_then(|d| d.1.get(&system.system_id).cloned())
+                            {
+                                if distance == 1 {
+                                    span.push(format!(" ({} jump)", distance));
+                                } else if distance > 1 {
+                                    span.push(format!(" ({} jumps)", distance));
+                                }
+                            }
+                        }
+
                         let span = self.context.font_cache.layout(
                             span,
                             font::TextAnchor::TopLeft,
@@ -555,7 +600,22 @@ impl<'a> Widget for Map<'a> {
                             1.0
                         };
 
-                        let color = super::sec_status_color(system.security_status);
+                        let mut color = super::sec_status_color(system.security_status);
+
+                        if show_distance {
+                            if let Some(distance) = self
+                                .distance_map
+                                .as_ref()
+                                .and_then(|(_, d)| d.get(&system.system_id).cloned())
+                            {
+                                color = if distance == 0 {
+                                    math::V3::fill(1.0)
+                                } else {
+                                    let distance = 20.0 - (distance as f64).min(20.0);
+                                    super::sec_status_color(distance / 20.0)
+                                };
+                            }
+                        }
 
                         SystemData {
                             center: system.position,

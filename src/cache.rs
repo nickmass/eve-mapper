@@ -62,6 +62,7 @@ struct Entry {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CacheKind {
+    None,
     Static,
     Dynamic,
     Image,
@@ -110,6 +111,7 @@ impl Cache {
             CacheKind::Static => self.static_store.get(key).await,
             CacheKind::Dynamic => self.dynamic_store.get(key).await,
             CacheKind::Image => self.image_store.get(key).await,
+            CacheKind::None => Err(CacheError::NonExistant),
         }
     }
 
@@ -129,6 +131,7 @@ impl Cache {
             CacheKind::Static => self.static_store.store(key, value, etag, expires).await,
             CacheKind::Dynamic => self.dynamic_store.store(key, value, etag, expires).await,
             CacheKind::Image => self.image_store.store(key, value, etag, expires).await,
+            CacheKind::None => Ok(()),
         }
     }
 

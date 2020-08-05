@@ -308,6 +308,11 @@ impl Window {
                 match (from, to) {
                     (Some(from), Some(to)) => {
                         world.create_route(from, to);
+                        if input_state.pressed_keys.contains(&VirtualKeyCode::LShift)
+                            | input_state.pressed_keys.contains(&VirtualKeyCode::RShift)
+                        {
+                            world.send_route_to_client();
+                        }
                         input_state.send_user_event(UserEvent::QueryEvent(QueryEvent::RouteChanged))
                     }
                     _ => (),
@@ -325,6 +330,14 @@ impl Window {
         if input_state.was_key_down(VirtualKeyCode::Back) {
             user_state.query_string.pop();
             graphics_context.request_redraw();
+        }
+
+        if input_state.was_key_down(VirtualKeyCode::Escape) {
+            world.clear_route();
+            input_state.send_user_event(UserEvent::QueryEvent(QueryEvent::SystemsFocused(
+                HashSet::new(),
+            )));
+            input_state.send_user_event(UserEvent::QueryEvent(QueryEvent::RouteChanged))
         }
     }
 
@@ -473,7 +486,13 @@ impl Window {
 fn sec_status_color(sec: f64) -> math::V3<f32> {
     let sec_status = sec.max(0.0).min(1.0) as f32;
     let blue = if sec_status >= 0.9 { 1.0 } else { 0.0 };
-    math::v3(1.0 - sec_status, sec_status, blue)
+    let green = if sec_status >= 0.5 { 1.0 } else { sec_status };
+    let red = if sec_status >= 0.6 {
+        1.0 - sec_status
+    } else {
+        1.0
+    };
+    math::v3(red, green, blue)
 }
 
 fn standing_color(standing: f64) -> math::V3<f32> {

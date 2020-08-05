@@ -1,4 +1,4 @@
-use reqwest::{header, Response, Url};
+use reqwest::{header, Method, Response, Url};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, Semaphore};
 
@@ -82,9 +82,14 @@ impl Client {
         &self,
         path: S,
     ) -> Result<T, Error> {
-        self.execute_get(&self.endpoint, path, false, CacheKind::Static, |bytes| {
-            serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize)
-        })
+        self.execute_get(
+            Method::GET,
+            &self.endpoint,
+            path,
+            false,
+            CacheKind::Static,
+            |bytes| serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize),
+        )
         .await
     }
 
@@ -92,9 +97,14 @@ impl Client {
         &self,
         path: S,
     ) -> Result<T, Error> {
-        self.execute_get(&self.endpoint, path, false, CacheKind::Dynamic, |bytes| {
-            serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize)
-        })
+        self.execute_get(
+            Method::GET,
+            &self.endpoint,
+            path,
+            false,
+            CacheKind::Dynamic,
+            |bytes| serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize),
+        )
         .await
     }
 
@@ -102,15 +112,49 @@ impl Client {
         &self,
         path: S,
     ) -> Result<T, Error> {
-        self.execute_get(&self.endpoint, path, true, CacheKind::Dynamic, |bytes| {
-            serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize)
-        })
+        {
+            let mut profile = self.profile.write().await;
+            if profile.token.expired() {
+                if let Ok(new_profile) = oauth::refresh(profile.clone()).await {
+                    *profile = new_profile;
+                }
+            }
+        }
+        self.execute_get(
+            Method::GET,
+            &self.endpoint,
+            path,
+            true,
+            CacheKind::Dynamic,
+            |bytes| serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize),
+        )
+        .await
+    }
+
+    async fn post_auth<S: AsRef<str>>(&self, path: S) -> Result<(), Error> {
+        {
+            let mut profile = self.profile.write().await;
+            if profile.token.expired() {
+                if let Ok(new_profile) = oauth::refresh(profile.clone()).await {
+                    *profile = new_profile;
+                }
+            }
+        }
+        self.execute_get(
+            Method::POST,
+            &self.endpoint,
+            path,
+            true,
+            CacheKind::None,
+            |_| Ok(()),
+        )
         .await
     }
 
     async fn get_image<S: AsRef<str>>(&self, path: S) -> Result<Vec<u8>, Error> {
         let logo = self
             .execute_get(
+                Method::GET,
                 &self.image_endpoint,
                 path,
                 true,
@@ -127,6 +171,7 @@ impl Client {
         T: serde::de::DeserializeOwned + serde::Serialize,
     >(
         &self,
+        method: Method,
         endpoint: &EsiEndpoint,
         path: S,
         auth: bool,
@@ -143,7 +188,7 @@ impl Client {
         use sha2::Digest;
         let path_hash = format!("{:x}", sha2::Sha256::digest(url.as_str().as_bytes()));
 
-        let mut request = self.client.get(url.clone()).header(
+        let mut request = self.client.request(method, url.clone()).header(
             header::USER_AGENT,
             "EveMapper-Development v0.01: nickmass@nickmass.com",
         );
@@ -265,21 +310,25 @@ impl Client {
                     map_value(&bytes)?
                 };
 
-                if let Some(expires) = parsed_expires {
-                    let cache_res = self
-                        .cache
-                        .store(&path_hash, cache_kind, &value, etag, expires)
-                        .await;
-                    match cache_res {
-                        Err(error) => log::error!("unable to store in cache {}: {:?}", uuid, error),
-                        _ => (),
+                if request.method() == &Method::GET {
+                    if let Some(expires) = parsed_expires {
+                        let cache_res = self
+                            .cache
+                            .store(&path_hash, cache_kind, &value, etag, expires)
+                            .await;
+                        match cache_res {
+                            Err(error) => {
+                                log::error!("unable to store in cache {}: {:?}", uuid, error)
+                            }
+                            _ => (),
+                        }
+                    } else {
+                        log::warn!(
+                            "invalid or missing expires header, skipping cache {}: {:?}",
+                            uuid,
+                            expires
+                        );
                     }
-                } else {
-                    log::warn!(
-                        "invalid or missing expires header, skipping cache {}: {:?}",
-                        uuid,
-                        expires
-                    );
                 }
                 return Ok(value);
             }
@@ -409,6 +458,26 @@ impl Client {
     pub async fn get_alliance_logo(&self, alliance_id: i32, size: u32) -> Result<Vec<u8>, Error> {
         let url = format!("alliances/{}/logo?size={}", alliance_id, size);
         self.get_image(&url).await
+    }
+
+    pub async fn get_character_online(&self) -> Result<GetCharacterOnline, Error> {
+        let character = self.profile.read().await.character.character_id;
+        let url = format!("characters/{}/online/", character);
+        self.get_auth_no_cache(&url).await
+    }
+
+    pub async fn post_waypoint(
+        &self,
+        add_to_beginning: bool,
+        clear_other_waypoints: bool,
+        destination_id: i32,
+    ) -> Result<(), Error> {
+        let url = format!(
+            "ui/autopilot/waypoint/?add_to_beginning={}&clear_other_waypoints={}&destination_id={}",
+            add_to_beginning, clear_other_waypoints, destination_id
+        );
+
+        self.post_auth(&url).await
     }
 }
 
@@ -574,4 +643,12 @@ pub struct GetSovereigntyMap {
     pub alliance_id: Option<i32>,
     pub corporation_id: Option<i32>,
     pub faction_id: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetCharacterOnline {
+    pub last_login: Option<String>,
+    pub last_logout: Option<String>,
+    pub logins: Option<i32>,
+    pub online: bool,
 }

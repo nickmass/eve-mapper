@@ -43,7 +43,15 @@ pub async fn load_or_authorize() -> Result<Profile, Error> {
         if crate::esi::ALWAYS_CACHE {
             return Ok(profile);
         }
-        if let Ok(_) = verify(&profile.token).await {
+        if profile.token.expired() {
+            log::info!("oauth token expired, refreshing");
+            if let Ok(profile) = refresh(profile).await {
+                Ok(profile)
+            } else {
+                log::info!("oauth token invalid, authorizing");
+                authorize().await
+            }
+        } else if let Ok(_) = verify(&profile.token).await {
             log::info!("using existing oauth profile");
             Ok(profile)
         } else {
@@ -172,14 +180,27 @@ pub struct Character {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AccessToken {
     access_token: String,
-    expires_in: i32,
+    expires_in: u64,
     token_type: String,
     refresh_token: String,
+    #[serde(default = "AccessToken::now")]
+    created_at: u64,
 }
 
 impl AccessToken {
     pub fn authorization(&self) -> String {
         format!("Bearer {}", self.access_token)
+    }
+
+    pub fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|err| err.duration())
+            .as_secs()
+    }
+
+    pub fn expired(&self) -> bool {
+        Self::now() > self.created_at + self.expires_in
     }
 }
 

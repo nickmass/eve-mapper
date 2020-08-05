@@ -115,7 +115,7 @@ impl<'a> Widget for RouteBox<'a> {
                         "{} » {}: {} Jumps",
                         start.name,
                         end.name,
-                        world.route_nodes().len()
+                        world.route_nodes().len() - 1
                     ));
 
                     let title_text = self.context.font_cache.layout(
@@ -165,7 +165,10 @@ impl<'a> Widget for RouteBox<'a> {
                         "● ",
                     )
                 } else {
-                    (system_color, "● ")
+                    (
+                        super::jump_type_color(&crate::world::JumpType::System).expand(1.0),
+                        "● ",
+                    )
                 };
 
                 let system_sec_color = super::sec_status_color(system.security_status).expand(1.0);

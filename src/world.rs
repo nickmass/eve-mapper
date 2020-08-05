@@ -89,6 +89,7 @@ pub struct RouteNode {
 
 enum UpdateRequest {
     AllianceLogo(i32),
+    SendRouteToClient(Option<i32>, Vec<i32>),
 }
 
 pub struct World {
@@ -213,6 +214,39 @@ impl World {
         stats.get(&system_id).cloned()
     }
 
+    pub fn distances_from(&self, system_id: i32) -> HashMap<i32, u32> {
+        let idx = self
+            .graph
+            .node_indices()
+            .find(|n| {
+                if let Node::System { system } = self.graph[*n] {
+                    system == system_id
+                } else {
+                    false
+                }
+            })
+            .unwrap();
+
+        let distances = petgraph::algo::dijkstra(&self.graph, idx, None, |e| match e.weight() {
+            Edge::JumpBridge { .. } | Edge::Jump { .. } | Edge::Wormhole { .. } => 1,
+            _ => 0,
+        });
+
+        distances
+            .into_iter()
+            .filter_map(|(k, distance)| match self.graph[k] {
+                Node::System { system } => Some((system, distance)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn clear_route(&mut self) {
+        self.route_target = None;
+        self.route_nodes.clear();
+        self.route.clear();
+    }
+
     pub fn create_route(&mut self, from: i32, to: i32) {
         let route_target = Some((from, to));
         if self.route_target == route_target {
@@ -321,6 +355,15 @@ impl World {
 
     pub fn route_target(&self) -> Option<(i32, i32)> {
         self.route_target
+    }
+
+    pub fn send_route_to_client(&self) {
+        let route = self.route.clone();
+        let player_location = self.location();
+
+        if let Some(sender) = self.update_sender.as_ref() {
+            let _ = sender.send(UpdateRequest::SendRouteToClient(player_location, route));
+        }
     }
 
     pub fn jumps(&self) -> Vec<Jump> {
@@ -885,6 +928,41 @@ impl World {
                             alliance_logos.write().unwrap().insert(alliance_id, logo);
                             let _ = event_proxy
                                 .send_event(UserEvent::DataEvent(DataEvent::ImageLoaded));
+                        }
+                        Some(UpdateRequest::SendRouteToClient(player_location, route)) => {
+                            if route.len() > 0 {
+                                match client.get_character_online().await {
+                                    Ok(online) => {
+                                        if !online.online {
+                                            continue;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        log::error!("send route online check failed: {:?}", error);
+                                    }
+                                }
+                                let player_on_route =
+                                    route.iter().any(|r| Some(*r) == player_location);
+                                let mut send_systems = !player_on_route;
+
+                                let mut first = true;
+
+                                for system in route {
+                                    if send_systems {
+                                        let result =
+                                            client.post_waypoint(false, first, system).await;
+                                        if let Err(error) = result {
+                                            log::error!("send route failed: {:?}", error);
+                                            break;
+                                        }
+                                        first = false;
+                                    } else {
+                                        if Some(system) == player_location {
+                                            send_systems = true;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         None => break,
                     }
