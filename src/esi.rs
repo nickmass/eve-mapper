@@ -1,6 +1,8 @@
+use async_std::sync::RwLock;
+use async_std::task::{sleep, spawn};
+use futures_intrusive::sync::Semaphore;
 use reqwest::{header, Method, Response, Url};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, Semaphore};
 
 use std::sync::Arc;
 
@@ -38,7 +40,7 @@ pub struct Client {
 pub enum Error {
     InvalidUrlPath(String, Box<dyn std::error::Error>),
     InvalidRequest(reqwest::Error),
-    Io(tokio::io::Error),
+    Io(std::io::Error),
     ResponseDeserialize(serde_json::Error),
     CannotCloneRequest,
     CannotExecuteRequest(reqwest::Error),
@@ -58,9 +60,9 @@ impl Client {
 
         let inner_cache = cache.clone();
 
-        tokio::spawn(async move {
+        spawn(async move {
             loop {
-                tokio::time::delay_for(std::time::Duration::from_secs(120)).await;
+                sleep(std::time::Duration::from_secs(120)).await;
                 let save_res = inner_cache.save().await;
                 match save_res {
                     Err(error) => log::error!("cache save error: {:?}", error),
@@ -74,7 +76,7 @@ impl Client {
             client: reqwest::Client::new(),
             profile: Arc::new(RwLock::new(profile)),
             cache,
-            limiter: Arc::new(Semaphore::new(5)),
+            limiter: Arc::new(Semaphore::new(true, 5)),
         }
     }
 
@@ -199,14 +201,16 @@ impl Client {
         }
 
         log::debug!("looking up url in cache: {}", &url);
-        let (etag, cached_value) = match self.cache.get(&path_hash, cache_kind).await {
-            Ok(value) => return Ok(value),
-            Err(CacheError::Expired(_, value)) if ALWAYS_CACHE => {
+        let (etag, cached_value) = match (cache_kind, self.cache.get(&path_hash, cache_kind).await)
+        {
+            (CacheKind::None, _) => (None, None),
+            (_, Ok(value)) => return Ok(value),
+            (_, Err(CacheError::Expired(_, value))) if ALWAYS_CACHE => {
                 log::info!("returning expired data: {}", &url);
                 return Ok(value);
             }
-            Err(CacheError::Expired(etag, value)) => (etag, Some(value)),
-            Err(_) => (None, None),
+            (_, Err(CacheError::Expired(etag, value))) => (etag, Some(value)),
+            (_, Err(_)) => (None, None),
         };
 
         if let Some(etag) = etag {
@@ -221,7 +225,7 @@ impl Client {
             let this_request = request.try_clone().ok_or(Error::CannotCloneRequest)?;
             log::info!("request {}: {}", uuid, url);
             let (response, request_start) = {
-                let _permit = self.limiter.acquire().await;
+                let _permit = self.limiter.acquire(1).await;
                 let start = std::time::Instant::now();
                 let response = self
                     .client
@@ -285,7 +289,7 @@ impl Client {
                     .map_err(|_| Error::InvalidEsiLimitHeader(format!("{:?}", limit.as_bytes())))?
                     * 1000;
                 log::warn!("error limit header found {} delaying for {}ms", uuid, dur);
-                tokio::time::delay_for(std::time::Duration::from_millis(dur)).await;
+                sleep(std::time::Duration::from_millis(dur)).await;
             }
 
             if !retry {
@@ -310,7 +314,7 @@ impl Client {
                     map_value(&bytes)?
                 };
 
-                if request.method() == &Method::GET {
+                if cache_kind != CacheKind::None {
                     if let Some(expires) = parsed_expires {
                         let cache_res = self
                             .cache

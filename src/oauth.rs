@@ -1,8 +1,14 @@
+use async_std::fs;
+use async_std::sync::Mutex;
+use async_std::task::spawn;
+use futures::channel::mpsc::{channel as mpsc, Sender};
+use futures::channel::oneshot::channel as oneshot;
+use futures::SinkExt;
+use futures::StreamExt;
 use hyper::service::make_service_fn;
 use hyper::{Body, Method, Request, Response, Server};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -34,7 +40,7 @@ const OAUTH_TOKEN: &str = "https://login.eveonline.com/v2/oauth/token/";
 const OAUTH_VERIFY: &str = "https://login.eveonline.com/oauth/verify/";
 
 pub async fn load_or_authorize() -> Result<Profile, Error> {
-    let profile: Option<Profile> = tokio::fs::read("eve-profile.json")
+    let profile: Option<Profile> = fs::read("eve-profile.json")
         .await
         .ok()
         .and_then(|p| serde_json::from_slice(&p).ok());
@@ -70,11 +76,11 @@ pub async fn load_or_authorize() -> Result<Profile, Error> {
 }
 
 pub async fn authorize() -> Result<Profile, Error> {
-    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-    let (end_tx, end_rx) = tokio::sync::oneshot::channel();
+    let (start_tx, start_rx) = oneshot();
+    let (end_tx, end_rx) = oneshot();
 
-    let (profile_tx, mut profile_rx) = tokio::sync::mpsc::channel(1);
-    let server = tokio::spawn({
+    let (profile_tx, mut profile_rx) = mpsc(1);
+    let server = spawn({
         let profile_tx = profile_tx.clone();
         async move {
             let oauth_state = Arc::new(Mutex::new(HashMap::new()));
@@ -119,12 +125,12 @@ pub async fn authorize() -> Result<Profile, Error> {
         }
     });
 
-    let profile = profile_rx.recv().await.unwrap();
+    let profile = profile_rx.next().await.unwrap();
     end_tx.send(()).unwrap();
-    server.await.unwrap();
+    server.await;
 
     let json = serde_json::to_vec(&profile).unwrap();
-    tokio::fs::write("eve-profile.json", json).await.unwrap();
+    fs::write("eve-profile.json", json).await.unwrap();
 
     Ok(profile)
 }
@@ -144,7 +150,7 @@ pub async fn refresh(mut profile: Profile) -> Result<Profile, Error> {
     profile.token = token;
 
     let json = serde_json::to_vec(&profile).unwrap();
-    tokio::fs::write("eve-profile.json", json).await.unwrap();
+    fs::write("eve-profile.json", json).await.unwrap();
 
     Ok(profile)
 }
@@ -206,7 +212,7 @@ impl AccessToken {
 
 struct OauthService {
     oauth_state: Arc<Mutex<HashMap<String, String>>>,
-    profile_tx: tokio::sync::mpsc::Sender<Profile>,
+    profile_tx: Sender<Profile>,
 }
 
 impl hyper::service::Service<Request<Body>> for OauthService {

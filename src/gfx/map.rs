@@ -256,7 +256,7 @@ impl<'a> Widget for Map<'a> {
 
         let text_transform = text_screen_matrix * text_scale_matrix * text_view_matrix;
 
-        let text_scale = self.window_size.y / 2160.0;
+        let text_scale = self.context.ui_scale();
 
         if input_state.mouse_move_delta() != math::V2::fill(0.0) || text_dirty {
             let mut selected_system = None;

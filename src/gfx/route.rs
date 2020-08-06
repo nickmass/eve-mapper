@@ -87,12 +87,13 @@ impl<'a> Widget for RouteBox<'a> {
         self.text_spans.clear();
         self.node_bounds.clear();
         self.background_rect = None;
-        let padding = 30.0;
+        let ui_scale = self.context.ui_scale();
+        let padding = 30.0 * ui_scale;
 
         if world.route_nodes().len() > 0 {
             let mut background_rect = math::Rect::new(
                 math::v2(padding, padding),
-                math::v2(padding + 650.0, padding + 360.0),
+                math::v2(padding + 650.0 * ui_scale, padding + 360.0 * ui_scale),
             );
 
             let mut cursor = background_rect.min + math::V2::fill(padding);
@@ -110,7 +111,8 @@ impl<'a> Widget for RouteBox<'a> {
 
             if let Some((start, end)) = world.route_target() {
                 if let (Some(start), Some(end)) = (world.system(start), world.system(end)) {
-                    let mut title_text = font::TextSpan::new(50.0, self.context.ui_font, white);
+                    let mut title_text =
+                        font::TextSpan::new(50.0 * ui_scale, self.context.ui_font, white);
                     title_text.push(format!(
                         "{} » {}: {} Jumps",
                         start.name,
@@ -175,7 +177,8 @@ impl<'a> Widget for RouteBox<'a> {
                 let standings_color =
                     super::standing_color(sov.map(|s| s.standing).unwrap_or(0.0)).expand(1.0);
 
-                let mut node_text = font::TextSpan::new(30.0, self.context.symbol_font, jump_color);
+                let mut node_text =
+                    font::TextSpan::new(30.0 * ui_scale, self.context.symbol_font, jump_color);
                 node_text
                     .push(jump_text)
                     .font(self.context.ui_font)

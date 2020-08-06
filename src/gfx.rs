@@ -1,9 +1,10 @@
 use glium::glutin;
 use glium::Surface;
-use glutin::event::{Event, MouseButton, VirtualKeyCode};
-use glutin::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
-use glutin::window::WindowBuilder;
+use winit::event::{Event, MouseButton, VirtualKeyCode};
+use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
+use winit::window::WindowBuilder;
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -74,11 +75,20 @@ pub struct GraphicsContext {
     pub symbol_font: font::FontId,
     pub font_cache: font::FontCache,
     pub images: images::Images,
+    ui_scale: Cell<f32>,
 }
 
 impl GraphicsContext {
     pub fn request_redraw(&self) {
         self.display.gl_window().window().request_redraw()
+    }
+
+    pub fn set_ui_scale(&self, window_size: math::V2<f32>) {
+        self.ui_scale.set(window_size.y / 2160.0)
+    }
+
+    pub fn ui_scale(&self) -> f32 {
+        self.ui_scale.get()
     }
 }
 
@@ -96,7 +106,7 @@ impl Window {
     pub fn new(width: u32, height: u32) -> Self {
         let event_loop = EventLoop::with_user_event();
         let w_builder = WindowBuilder::new()
-            .with_inner_size(glutin::dpi::LogicalSize::new(width, height))
+            .with_inner_size(winit::dpi::LogicalSize::new(width, height))
             .with_transparent(false)
             .with_title("EVE Mapper");
         let c_builder = glutin::ContextBuilder::new()
@@ -173,6 +183,7 @@ impl Window {
             symbol_font,
             font_cache,
             images,
+            ui_scale: Cell::new(1.0),
         };
 
         let user_state = UserState {
@@ -188,17 +199,13 @@ impl Window {
     }
 
     pub fn run(self) -> ! {
-        let mut runtime = tokio::runtime::Builder::new()
-            .threaded_scheduler()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = async_std::task::Builder::new();
         let mut graphics_state = self.graphics_state;
 
         let event_proxy = self.event_loop.create_proxy();
 
         let mut world = World::new(event_proxy.clone());
-        runtime.block_on(async {
+        runtime.blocking(async {
             let profile = crate::oauth::load_or_authorize().await.unwrap();
             let client = crate::esi::Client::new(profile).await;
             world.load(&client).await.unwrap();
@@ -219,11 +226,15 @@ impl Window {
         let mut render_time = Instant::now();
 
         self.event_loop.run(move |event, _window, control_flow| {
-            use glutin::event::*;
+            use winit::event::*;
             match event {
                 Event::NewEvents(_) => {}
                 Event::MainEventsCleared => {
                     let dt = frame_time.elapsed();
+
+                    if let Some(window_size) = input_state.window_resized() {
+                        graphics_context.set_ui_scale(window_size.as_f32());
+                    }
 
                     Window::update(
                         dt,
@@ -625,15 +636,15 @@ pub struct InputState {
     event_proxy: EventLoopProxy<UserEvent>,
     closed: bool,
     text: String,
-    pressed_keys: HashSet<glutin::event::VirtualKeyCode>,
-    released_keys: HashSet<glutin::event::VirtualKeyCode>,
+    pressed_keys: HashSet<winit::event::VirtualKeyCode>,
+    released_keys: HashSet<winit::event::VirtualKeyCode>,
     mouse_wheel_delta: f32,
     window_size: math::V2<u32>,
     window_start_size: math::V2<u32>,
     mouse_position: math::V2<f32>,
     mouse_start_position: math::V2<f32>,
-    pressed_mouse: HashSet<glutin::event::MouseButton>,
-    released_mouse: HashSet<glutin::event::MouseButton>,
+    pressed_mouse: HashSet<winit::event::MouseButton>,
+    released_mouse: HashSet<winit::event::MouseButton>,
     user_events: Vec<UserEvent>,
 }
 
@@ -675,7 +686,7 @@ impl InputState {
     }
 
     pub fn process(&mut self, event: Event<UserEvent>) {
-        use glutin::event::*;
+        use winit::event::*;
         match event {
             Event::UserEvent(user_event) => self.user_events.push(user_event),
             Event::WindowEvent {

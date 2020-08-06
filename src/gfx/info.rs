@@ -69,9 +69,10 @@ impl<'a> Widget for InfoBox<'a> {
             return;
         }
 
+        let ui_scale = self.context.ui_scale();
         self.text_spans.clear();
         self.background_rect = None;
-        let padding = 30.0;
+        let padding = 30.0 * ui_scale;
 
         let selected_system = self.route_system.or(self.map_system);
         if let Some(system) = selected_system.and_then(|id| world.system(id)) {
@@ -114,12 +115,12 @@ impl<'a> Widget for InfoBox<'a> {
             let system_sec_color = super::sec_status_color(system.security_status).expand(1.0);
 
             let mut background_rect = math::Rect::new(
-                math::v2(self.window_size.x - padding - 650.0, padding),
-                math::v2(self.window_size.x - padding, padding + 360.0),
+                math::v2(self.window_size.x - padding - (650.0 * ui_scale), padding),
+                math::v2(self.window_size.x - padding, padding + (360.0 * ui_scale)),
             );
             let image_rect = math::Rect::new(
                 background_rect.min + math::V2::fill(padding),
-                background_rect.min + math::V2::fill(padding + 128.0),
+                background_rect.min + math::V2::fill(padding + (128.0 * ui_scale)),
             );
 
             let system_name_pos = if let Some(_) = image.as_ref() {
@@ -130,7 +131,8 @@ impl<'a> Widget for InfoBox<'a> {
 
             let white = math::V4::fill(1.0);
 
-            let mut system_name = font::TextSpan::new(90.0, self.context.title_font, white);
+            let mut system_name =
+                font::TextSpan::new(90.0 * ui_scale, self.context.title_font, white);
             system_name.push(&system.name);
             let system_name = self.context.font_cache.layout(
                 system_name,
@@ -139,7 +141,7 @@ impl<'a> Widget for InfoBox<'a> {
                 false,
             );
 
-            let mut system_sec = font::TextSpan::new(40.0, self.context.ui_font, white);
+            let mut system_sec = font::TextSpan::new(40.0 * ui_scale, self.context.ui_font, white);
             system_sec
                 .push(" (")
                 .color(system_sec_color)
@@ -166,7 +168,8 @@ impl<'a> Widget for InfoBox<'a> {
             };
 
             let region_name = if let (Some(region), Some(constellation)) = (region, constellation) {
-                let mut region_span = font::TextSpan::new(30.0, self.context.ui_font, white);
+                let mut region_span =
+                    font::TextSpan::new(30.0 * ui_scale, self.context.ui_font, white);
                 region_span.push(format!("{} « {}", region.name, constellation.name));
                 let region = self.context.font_cache.layout(
                     region_span,
@@ -190,7 +193,7 @@ impl<'a> Widget for InfoBox<'a> {
 
             let alliance_name = if let Some(alliance) = alliance {
                 let mut alliance_span =
-                    font::TextSpan::new(30.0, self.context.symbol_font, standing_color);
+                    font::TextSpan::new(30.0 * ui_scale, self.context.symbol_font, standing_color);
                 alliance_span
                     .push("● ")
                     .color(white)
@@ -212,7 +215,7 @@ impl<'a> Widget for InfoBox<'a> {
 
             let corporation_name = if let Some(corporation) = corporation {
                 let mut corporation_span =
-                    font::TextSpan::new(30.0, self.context.symbol_font, standing_color);
+                    font::TextSpan::new(30.0 * ui_scale, self.context.symbol_font, standing_color);
                 corporation_span
                     .push("● ")
                     .color(white)
@@ -234,10 +237,10 @@ impl<'a> Widget for InfoBox<'a> {
 
             let stats = if let Some(stats) = stats {
                 cursor.y = cursor.y + padding;
-                let mut jumps = font::TextSpan::new(30.0, self.context.ui_font, white);
-                let mut ships = font::TextSpan::new(30.0, self.context.ui_font, white);
-                let mut pods = font::TextSpan::new(30.0, self.context.ui_font, white);
-                let mut npcs = font::TextSpan::new(30.0, self.context.ui_font, white);
+                let mut jumps = font::TextSpan::new(30.0 * ui_scale, self.context.ui_font, white);
+                let mut ships = font::TextSpan::new(30.0 * ui_scale, self.context.ui_font, white);
+                let mut pods = font::TextSpan::new(30.0 * ui_scale, self.context.ui_font, white);
+                let mut npcs = font::TextSpan::new(30.0 * ui_scale, self.context.ui_font, white);
 
                 jumps.push(format!("Jumps: {}", stats.jumps));
                 ships.push(format!("Ship Kills: {}", stats.ship_kills));

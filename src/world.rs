@@ -1,10 +1,11 @@
+use async_std::sync::RwLock as RwLockAsync;
+use async_std::task::{sleep, spawn};
+use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::future::FutureExt;
 use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt;
-use glium::glutin::event_loop::EventLoopProxy;
 use petgraph::Graph;
-
-use tokio::sync::mpsc;
+use winit::event_loop::EventLoopProxy;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -109,7 +110,7 @@ pub struct World {
     corporations: Arc<RwLock<HashMap<i32, esi::GetCorporation>>>,
     alliance_logos: Arc<RwLock<HashMap<i32, Arc<Vec<u8>>>>>,
     event_proxy: EventLoopProxy<UserEvent>,
-    update_sender: Option<mpsc::UnboundedSender<UpdateRequest>>,
+    update_sender: Option<UnboundedSender<UpdateRequest>>,
 }
 
 impl World {
@@ -184,7 +185,7 @@ impl World {
             logo
         } else {
             if let Some(sender) = self.update_sender.as_ref() {
-                let _ = sender.send(UpdateRequest::AllianceLogo(alliance_id));
+                let _ = sender.unbounded_send(UpdateRequest::AllianceLogo(alliance_id));
             }
             None
         }
@@ -362,7 +363,7 @@ impl World {
         let player_location = self.location();
 
         if let Some(sender) = self.update_sender.as_ref() {
-            let _ = sender.send(UpdateRequest::SendRouteToClient(player_location, route));
+            let _ = sender.unbounded_send(UpdateRequest::SendRouteToClient(player_location, route));
         }
     }
 
@@ -433,12 +434,10 @@ impl World {
         corporations: &Arc<RwLock<HashMap<i32, esi::GetCorporation>>>,
         client: &esi::Client,
     ) {
-        use tokio::sync::RwLock;
-
         let character = client.get_character_self().await.unwrap();
 
-        let alliance_standings = Arc::new(RwLock::new(HashMap::new()));
-        let corporation_standings = Arc::new(RwLock::new(HashMap::new()));
+        let alliance_standings = Arc::new(RwLockAsync::new(HashMap::new()));
+        let corporation_standings = Arc::new(RwLockAsync::new(HashMap::new()));
 
         let update_alliance_standings = async {
             if let Some(alliance_id) = character.alliance_id {
@@ -894,7 +893,7 @@ impl World {
                 .add_edge(left_node_id.clone(), right_node_id.clone(), edge);
         }
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = unbounded();
         self.update_sender = Some(tx);
         self.spawn_background_updater(client.clone(), rx);
 
@@ -904,7 +903,7 @@ impl World {
     fn spawn_background_updater(
         &self,
         client: esi::Client,
-        mut update_receiver: mpsc::UnboundedReceiver<UpdateRequest>,
+        mut update_receiver: UnboundedReceiver<UpdateRequest>,
     ) {
         let event_proxy = self.event_proxy.clone();
         let player_system = self.player_system.clone();
@@ -914,7 +913,7 @@ impl World {
         let corporations = self.corporations.clone();
 
         let alliance_logos = self.alliance_logos.clone();
-        tokio::spawn({
+        spawn({
             let client = client.clone();
             let event_proxy = event_proxy.clone();
             async move {
@@ -964,12 +963,14 @@ impl World {
                                 }
                             }
                         }
-                        None => break,
+                        None => {
+                            break;
+                        }
                     }
                 }
             }
         });
-        tokio::spawn(async move {
+        spawn(async move {
             let mut counter = 0;
             let poll_interval = 10;
             loop {
@@ -996,7 +997,7 @@ impl World {
                     let _ =
                         event_proxy.send_event(UserEvent::DataEvent(DataEvent::SystemStatsChanged));
                 }
-                tokio::time::delay_for(std::time::Duration::from_secs(poll_interval)).await;
+                sleep(std::time::Duration::from_secs(poll_interval)).await;
                 counter += poll_interval;
             }
         });

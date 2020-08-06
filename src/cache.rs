@@ -1,6 +1,6 @@
+use async_std::fs;
+use async_std::sync::RwLock;
 use serde::{Deserialize, Serialize};
-
-use tokio::sync::RwLock;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -76,7 +76,7 @@ pub enum CacheError<T> {
 
 #[derive(Debug)]
 pub enum Error {
-    Io(tokio::io::Error),
+    Io(std::io::Error),
     Deserialize(flexbuffers::DeserializationError),
     Serialize(flexbuffers::SerializationError),
 }
@@ -148,7 +148,7 @@ impl<E: Expiry> Store<E> {
     async fn load<P: AsRef<Path>>(path: P) -> Result<Store<E>, Error> {
         let path = path.as_ref();
         let entries = if path.exists() {
-            let bytes = tokio::fs::read(&path).await.map_err(Error::Io)?;
+            let bytes = fs::read(&path).await.map_err(Error::Io)?;
             flexbuffers::from_slice(&bytes).map_err(Error::Deserialize)?
         } else {
             HashMap::new()
@@ -212,9 +212,7 @@ impl<E: Expiry> Store<E> {
             *self.dirty.write().await = false;
             let entries = self.entries.read().await;
             let data = flexbuffers::to_vec(&*entries).map_err(Error::Serialize)?;
-            tokio::fs::write(&self.path, data)
-                .await
-                .map_err(Error::Io)?;
+            fs::write(&self.path, data).await.map_err(Error::Io)?;
         }
 
         Ok(())
