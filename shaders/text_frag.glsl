@@ -9,5 +9,5 @@ uniform sampler2D font_atlas;
 
 void main () {
   float coverage = texture(font_atlas, v_uv).x;
-  color = v_color * coverage;
+  color = vec4(v_color.xyz, coverage * v_color.w);
 }

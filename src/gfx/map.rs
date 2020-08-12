@@ -1,8 +1,9 @@
 use crate::math;
+use crate::platform::{Buffer, Frame};
 use crate::world::{JumpType, World};
 
 use super::{
-    font, DataEvent, GraphicsContext, GraphicsState, InputState, LineVertex, MapEvent, MouseButton,
+    font, CircleVertex, DataEvent, GraphicsContext, InputState, LineVertex, MapEvent, MouseButton,
     QueryEvent, SystemData, UserEvent, Widget,
 };
 
@@ -38,10 +39,8 @@ pub struct Map<'a> {
     jump_vertexes: Option<Vec<LineVertex>>,
     selected_system: Option<i32>,
     focused_systems: HashSet<i32>,
-    systems_vertex_buffer: Option<glium::VertexBuffer<SystemData>>,
-    jumps_vertex_buffer: Option<glium::VertexBuffer<LineVertex>>,
-    system_draw_params: glium::DrawParameters<'static>,
-    jump_draw_params: glium::DrawParameters<'static>,
+    systems_vertex_buffer: Option<Buffer<SystemData>>,
+    jumps_vertex_buffer: Option<Buffer<LineVertex>>,
     current_zoom: f32,
     target_zoom: f32,
     scale_matrix: math::M3<f32>,
@@ -54,46 +53,27 @@ pub struct Map<'a> {
     system_names: Vec<font::PositionedTextSpan>,
     player_location: Option<i32>,
     sov_vertexes: Option<Vec<SystemData>>,
-    sov_vertex_buffer: Option<glium::VertexBuffer<SystemData>>,
+    sov_vertex_buffer: Option<Buffer<SystemData>>,
     distance_map: Option<(i32, HashMap<i32, u32>)>,
+    circle_buffer: Buffer<CircleVertex>,
 }
 
 impl<'a> Map<'a> {
     pub fn new(context: &'a GraphicsContext) -> Self {
-        let system_draw_params = glium::DrawParameters {
-            blend: glium::Blend {
-                color: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::SourceAlpha,
-                    destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
-                },
-                alpha: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::Zero,
-                    destination: glium::LinearBlendingFactor::One,
-                },
-                constant_value: (1.0, 1.0, 1.0, 1.0),
-            },
-            ..Default::default()
-        };
+        let mut circle_verts = Vec::new();
+        circle_verts.push(CircleVertex {
+            position: math::v2(0.0, 0.0),
+        });
 
-        let jump_draw_params = glium::DrawParameters {
-            blend: glium::Blend {
-                color: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::SourceAlpha,
-                    destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
-                },
-                alpha: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::Zero,
-                    destination: glium::LinearBlendingFactor::One,
-                },
-                constant_value: (1.0, 1.0, 1.0, 1.0),
-            },
-            depth: glium::Depth {
-                test: glium::DepthTest::IfMoreOrEqual,
-                write: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        for i in 0..17 {
+            let n = ((2.0 * std::f32::consts::PI) / 16.0) * i as f32;
+            circle_verts.push(CircleVertex {
+                position: math::v2(n.sin(), n.cos()),
+            });
+        }
+
+        let circle_buffer = context.display.fill_buffer(&circle_verts);
+
         Map {
             context,
             map_systems: None,
@@ -104,8 +84,6 @@ impl<'a> Map<'a> {
             focused_systems: HashSet::new(),
             systems_vertex_buffer: None,
             jumps_vertex_buffer: None,
-            system_draw_params,
-            jump_draw_params,
             current_zoom: 1.0,
             target_zoom: 1.0,
             scale_matrix: math::M3::identity(),
@@ -120,6 +98,7 @@ impl<'a> Map<'a> {
             sov_vertexes: None,
             sov_vertex_buffer: None,
             distance_map: None,
+            circle_buffer,
         }
     }
 }
@@ -141,6 +120,10 @@ impl<'a> Widget for Map<'a> {
                 UserEvent::QueryEvent(QueryEvent::SystemsFocused(systems)) => {
                     self.focused_systems = systems.clone();
                     self.system_vertexes = None;
+                }
+                UserEvent::DataEvent(DataEvent::GalaxyImported) => {
+                    self.map_systems = None;
+                    self.map_jumps = None;
                 }
                 _ => (),
             }
@@ -476,7 +459,7 @@ impl<'a> Widget for Map<'a> {
                 }
             }
 
-            self.context.request_redraw()
+            self.context.request_redraw("map text dirty")
         }
 
         if self.jump_vertexes.is_none() {
@@ -515,7 +498,7 @@ impl<'a> Widget for Map<'a> {
                         right_color = right_color + math::V3::fill(0.1);
                     }
 
-                    let level = if jump.on_route { 1.0 } else { 0.0 };
+                    let level = if jump.on_route { 1.0 } else { 0.5 };
 
                     let jump_left = left_system.position.expand(level);
                     let jump_right = right_system.position.expand(level);
@@ -661,173 +644,91 @@ impl<'a> Widget for Map<'a> {
 
         if self.systems_vertex_buffer.is_none() {
             if let Some(vertexes) = self.system_vertexes.as_ref() {
-                let system_data = glium::VertexBuffer::new(&self.context.display, &vertexes);
-                match system_data {
-                    Ok(buf) => self.systems_vertex_buffer = Some(buf),
-                    Err(error) => {
-                        log::error!("failed to create map systems vertex buffer: {}", error)
-                    }
-                }
+                self.systems_vertex_buffer = Some(self.context.display.fill_buffer(vertexes));
 
-                self.context.request_redraw()
+                self.context.request_redraw("map systems bugger")
             }
         }
 
         if self.jumps_vertex_buffer.is_none() {
             if let Some(vertexes) = self.jump_vertexes.as_ref() {
-                let jump_data = glium::VertexBuffer::new(&self.context.display, &vertexes);
-                match jump_data {
-                    Ok(buf) => self.jumps_vertex_buffer = Some(buf),
-                    Err(error) => {
-                        log::error!("failed to create map jumps vertex buffer: {}", error)
-                    }
-                }
+                self.jumps_vertex_buffer = Some(self.context.display.fill_buffer(&vertexes));
 
-                self.context.request_redraw()
+                self.context.request_redraw("map jumps buffer")
             }
         }
 
         if self.sov_vertex_buffer.is_none() {
             if let Some(vertexes) = self.sov_vertexes.as_ref() {
-                let sov_system_data = glium::VertexBuffer::new(&self.context.display, &vertexes);
-                match sov_system_data {
-                    Ok(buf) => self.sov_vertex_buffer = Some(buf),
-                    Err(error) => log::error!("failed to create map sov vertex buffer: {}", error),
-                }
+                self.sov_vertex_buffer = Some(self.context.display.fill_buffer(&vertexes));
 
-                self.context.request_redraw()
+                self.context.request_redraw("map sov buffer")
             }
         }
     }
 
-    fn draw<S: glium::Surface>(&mut self, graphics_state: &GraphicsState, frame: &mut S) {
-        let uniforms = glium::uniform! {
-            map_scale_matrix: self.scale_matrix,
-            map_view_matrix: self.view_matrix,
-            zoom: self.current_zoom,
-            window_size: self.window_size,
-            font_atlas: self.context.font_cache.sampler()
-        };
-
+    fn draw(&mut self, frame: &mut Frame) {
         if self.region_names_layer == Some(RegionNamesLayer::Background)
             && self.region_names.len() > 0
         {
-            let mut text_buf = Vec::new();
-            for text in self.region_names.iter() {
-                self.context
-                    .font_cache
-                    .draw(text, &mut text_buf, self.window_size);
-            }
-
-            let text_data_buf = glium::VertexBuffer::new(&self.context.display, &text_buf).unwrap();
-
-            let draw_res = frame.draw(
-                &text_data_buf,
-                &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                &graphics_state.text_program,
-                &uniforms,
-                &self.system_draw_params,
+            self.context.display.draw_text(
+                frame,
+                &self.context.font_cache,
+                &self.region_names,
+                self.context.ui_scale(),
             );
-
-            if let Err(error) = draw_res {
-                log::error!("map region names draw error: {:?}", error);
-            }
         }
 
         if let Some(sov_data) = self.sov_vertex_buffer.as_ref() {
-            let draw_res = frame.draw(
-                (
-                    &graphics_state.circle_model,
-                    sov_data.per_instance().unwrap(),
-                ),
-                &glium::index::NoIndices(glium::index::PrimitiveType::TriangleFan),
-                &graphics_state.system_program,
-                &uniforms,
-                &self.system_draw_params,
+            self.context.display.draw_system(
+                frame,
+                &self.circle_buffer,
+                sov_data,
+                self.current_zoom,
+                self.scale_matrix,
+                self.view_matrix,
             );
-
-            if let Err(error) = draw_res {
-                log::error!("map sov draw error: {:?}", error);
-            }
         }
 
         if let Some(jump_data) = self.jumps_vertex_buffer.as_ref() {
-            let draw_res = frame.draw(
+            self.context.display.draw_jump(
+                frame,
                 jump_data,
-                &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                &graphics_state.jump_program,
-                &uniforms,
-                &self.jump_draw_params,
+                self.current_zoom,
+                self.scale_matrix,
+                self.view_matrix,
             );
-
-            if let Err(error) = draw_res {
-                log::error!("map jump draw error: {:?}", error);
-            }
         }
 
         if let Some(system_data) = self.systems_vertex_buffer.as_ref() {
-            let draw_res = frame.draw(
-                (
-                    &graphics_state.circle_model,
-                    system_data.per_instance().unwrap(),
-                ),
-                &glium::index::NoIndices(glium::index::PrimitiveType::TriangleFan),
-                &graphics_state.system_program,
-                &uniforms,
-                &self.system_draw_params,
+            self.context.display.draw_system(
+                frame,
+                &self.circle_buffer,
+                system_data,
+                self.current_zoom,
+                self.scale_matrix,
+                self.view_matrix,
             );
-
-            if let Err(error) = draw_res {
-                log::error!("map system draw error: {:?}", error);
-            }
         }
 
         if self.system_names.len() > 0 {
-            let mut text_buf = Vec::new();
-            for text in self.system_names.iter() {
-                self.context
-                    .font_cache
-                    .draw(text, &mut text_buf, self.window_size);
-            }
-
-            let text_data_buf = glium::VertexBuffer::new(&self.context.display, &text_buf).unwrap();
-
-            let draw_res = frame.draw(
-                &text_data_buf,
-                &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                &graphics_state.text_program,
-                &uniforms,
-                &self.system_draw_params,
+            self.context.display.draw_text(
+                frame,
+                &self.context.font_cache,
+                &self.system_names,
+                self.context.ui_scale(),
             );
-
-            if let Err(error) = draw_res {
-                log::error!("map system names draw error: {:?}", error);
-            }
         }
 
         if self.region_names_layer == Some(RegionNamesLayer::Foreground)
             && self.region_names.len() > 0
         {
-            let mut text_buf = Vec::new();
-            for text in self.region_names.iter() {
-                self.context
-                    .font_cache
-                    .draw(text, &mut text_buf, self.window_size);
-            }
-
-            let text_data_buf = glium::VertexBuffer::new(&self.context.display, &text_buf).unwrap();
-
-            let draw_res = frame.draw(
-                &text_data_buf,
-                &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                &graphics_state.text_program,
-                &uniforms,
-                &self.system_draw_params,
+            self.context.display.draw_text(
+                frame,
+                &self.context.font_cache,
+                &self.region_names,
+                self.context.ui_scale(),
             );
-
-            if let Err(error) = draw_res {
-                log::error!("map region names draw error: {:?}", error);
-            }
         }
     }
 }

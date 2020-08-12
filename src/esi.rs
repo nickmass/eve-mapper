@@ -1,13 +1,15 @@
 use async_std::sync::RwLock;
-use async_std::task::{sleep, spawn};
+use async_std::task::sleep;
 use futures_intrusive::sync::Semaphore;
 use reqwest::{header, Method, Response, Url};
 use serde::{Deserialize, Serialize};
 
 use std::sync::Arc;
 
-use super::cache::{Cache, CacheError, CacheKind};
-use super::oauth::{self, Profile};
+use crate::cache::{Cache, CacheError, CacheKind};
+use crate::oauth::{self, Profile};
+use crate::platform::time::{Instant, SystemTime};
+use crate::platform::{parse_http_date, spawn, ESI_IMAGE_SERVER};
 
 pub const ALWAYS_CACHE: bool = false;
 
@@ -21,7 +23,7 @@ impl EsiEndpoint {
     fn as_url_base(&self) -> Url {
         match *self {
             EsiEndpoint::Latest => Url::parse("https://esi.evetech.net/latest/").unwrap(),
-            EsiEndpoint::Images => Url::parse("https://images.evetech.net/").unwrap(),
+            EsiEndpoint::Images => Url::parse(ESI_IMAGE_SERVER).unwrap(),
         }
     }
 }
@@ -36,16 +38,22 @@ pub struct Client {
     limiter: Arc<Semaphore>,
 }
 
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("endpoint", &self.endpoint)
+            .field("image_endpoint", &self.image_endpoint)
+            .finish()
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
-    InvalidUrlPath(String, Box<dyn std::error::Error>),
-    InvalidRequest(reqwest::Error),
+    InvalidUrlPath(String),
     Io(std::io::Error),
     ResponseDeserialize(serde_json::Error),
-    CannotCloneRequest,
     CannotExecuteRequest(reqwest::Error),
     CannotRetrieveRequestBody(reqwest::Error),
-    CannotParseAuthorizationHeader,
     InvalidEsiLimitHeader(String),
     RetriesExhausted,
 }
@@ -84,7 +92,7 @@ impl Client {
         &self,
         path: S,
     ) -> Result<T, Error> {
-        self.execute_get(
+        self.execute(
             Method::GET,
             &self.endpoint,
             path,
@@ -99,7 +107,7 @@ impl Client {
         &self,
         path: S,
     ) -> Result<T, Error> {
-        self.execute_get(
+        self.execute(
             Method::GET,
             &self.endpoint,
             path,
@@ -122,7 +130,7 @@ impl Client {
                 }
             }
         }
-        self.execute_get(
+        self.execute(
             Method::GET,
             &self.endpoint,
             path,
@@ -142,7 +150,7 @@ impl Client {
                 }
             }
         }
-        self.execute_get(
+        self.execute(
             Method::POST,
             &self.endpoint,
             path,
@@ -155,7 +163,7 @@ impl Client {
 
     async fn get_image<S: AsRef<str>>(&self, path: S) -> Result<Vec<u8>, Error> {
         let logo = self
-            .execute_get(
+            .execute(
                 Method::GET,
                 &self.image_endpoint,
                 path,
@@ -167,7 +175,7 @@ impl Client {
         logo.map(serde_bytes::ByteBuf::into_vec)
     }
 
-    async fn execute_get<
+    async fn execute<
         S: AsRef<str>,
         F: Fn(&[u8]) -> Result<T, Error>,
         T: serde::de::DeserializeOwned + serde::Serialize,
@@ -181,57 +189,49 @@ impl Client {
         map_value: F,
     ) -> Result<T, Error> {
         let uuid = uuid::Uuid::new_v4();
-        let path = path.as_ref();
-        let url = endpoint
-            .as_url_base()
-            .join(path)
-            .map_err(|e| Error::InvalidUrlPath(path.to_string(), e.into()))?;
-
-        use sha2::Digest;
-        let path_hash = format!("{:x}", sha2::Sha256::digest(url.as_str().as_bytes()));
-
-        let mut request = self.client.request(method, url.clone()).header(
-            header::USER_AGENT,
-            "EveMapper-Development v0.01: nickmass@nickmass.com",
-        );
-
-        if auth {
-            let auth = self.profile.read().await.token.authorization();
-            request = request.header(header::AUTHORIZATION, auth);
-        }
-
-        log::debug!("looking up url in cache: {}", &url);
-        let (etag, cached_value) = match (cache_kind, self.cache.get(&path_hash, cache_kind).await)
-        {
-            (CacheKind::None, _) => (None, None),
-            (_, Ok(value)) => return Ok(value),
-            (_, Err(CacheError::Expired(_, value))) if ALWAYS_CACHE => {
-                log::info!("returning expired data: {}", &url);
-                return Ok(value);
-            }
-            (_, Err(CacheError::Expired(etag, value))) => (etag, Some(value)),
-            (_, Err(_)) => (None, None),
-        };
-
-        if let Some(etag) = etag {
-            request = request.header(header::IF_NONE_MATCH, etag)
-        }
-
-        let mut request = request.build().map_err(|e| Error::InvalidRequest(e))?;
-
         let mut retry_count: u32 = 0;
-
         while retry_count < 5 {
-            let this_request = request.try_clone().ok_or(Error::CannotCloneRequest)?;
+            let path = path.as_ref();
+            let url = endpoint
+                .as_url_base()
+                .join(path)
+                .map_err(|_e| Error::InvalidUrlPath(path.to_string()))?;
+
+            use sha2::Digest;
+            let path_hash = format!("{:x}", sha2::Sha256::digest(url.as_str().as_bytes()));
+
+            let mut request = self.client.request(method.clone(), url.clone()).header(
+                header::USER_AGENT,
+                "EveMapper-Development v0.01: nickmass@nickmass.com",
+            );
+
+            if auth {
+                let auth = self.profile.read().await.token.authorization();
+                request = request.header(header::AUTHORIZATION, auth);
+            }
+
+            log::debug!("looking up url in cache: {}", &url);
+            let (etag, cached_value) =
+                match (cache_kind, self.cache.get(&path_hash, cache_kind).await) {
+                    (CacheKind::None, _) => (None, None),
+                    (_, Ok(value)) => return Ok(value),
+                    (_, Err(CacheError::Expired(_, value))) if ALWAYS_CACHE => {
+                        log::info!("returning expired data: {}", &url);
+                        return Ok(value);
+                    }
+                    (_, Err(CacheError::Expired(etag, value))) => (etag, Some(value)),
+                    (_, Err(_)) => (None, None),
+                };
+
+            if let Some(etag) = etag {
+                request = request.header(header::IF_NONE_MATCH, etag)
+            }
+
             log::info!("request {}: {}", uuid, url);
             let (response, request_start) = {
                 let _permit = self.limiter.acquire(1).await;
-                let start = std::time::Instant::now();
-                let response = self
-                    .client
-                    .execute(this_request)
-                    .await
-                    .map_err(Error::CannotExecuteRequest)?;
+                let start = Instant::now();
+                let response = request.send().await.map_err(Error::CannotExecuteRequest)?;
                 (response, start)
             };
 
@@ -258,7 +258,7 @@ impl Client {
 
             if reauth {
                 log::info!("refreshing authentication token {}", uuid);
-                let reauth_start = std::time::Instant::now();
+                let reauth_start = Instant::now();
                 let mut profile = self.profile.write().await;
                 if let Ok(new_profile) = oauth::refresh(profile.clone()).await {
                     *profile = new_profile;
@@ -267,17 +267,6 @@ impl Client {
                         uuid,
                         reauth_start.elapsed().as_millis()
                     );
-
-                    let header_value = profile
-                        .token
-                        .authorization()
-                        .parse()
-                        .map_err(|_| Error::CannotParseAuthorizationHeader)?;
-
-                    request
-                        .headers_mut()
-                        .get_mut(header::AUTHORIZATION)
-                        .map(|v| *v = header_value);
                 }
             }
 
@@ -296,7 +285,7 @@ impl Client {
                 let parsed_expires = expires
                     .as_ref()
                     .and_then(|v| v.to_str().map(String::from).ok())
-                    .and_then(|v| httpdate::parse_http_date(&v).ok())
+                    .and_then(|v| parse_http_date(&v))
                     .or_else(|| parse_cache_control(&response));
 
                 let etag = parse_etag(&response);
@@ -485,7 +474,7 @@ impl Client {
     }
 }
 
-fn parse_cache_control(response: &Response) -> Option<std::time::SystemTime> {
+fn parse_cache_control(response: &Response) -> Option<SystemTime> {
     response
         .headers()
         .get(header::CACHE_CONTROL)
@@ -495,9 +484,9 @@ fn parse_cache_control(response: &Response) -> Option<std::time::SystemTime> {
             if s.starts_with("max-age=") {
                 let index = "max-age=".len();
                 let seconds = s[index..].trim().parse::<u64>().ok()?;
-                Some(std::time::SystemTime::now() + std::time::Duration::from_secs(seconds))
+                Some(SystemTime::now() + std::time::Duration::from_secs(seconds))
             } else if s == "no-cache" || s == "no-store" {
-                Some(std::time::SystemTime::now() - std::time::Duration::from_secs(1))
+                Some(SystemTime::now() - std::time::Duration::from_secs(1))
             } else {
                 None
             }

@@ -1,10 +1,11 @@
-use async_std::fs;
 use async_std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::platform::time::{SystemTime, UNIX_EPOCH};
+use crate::platform::{file_exists, read_file, write_file};
 
 trait Expiry {
     fn is_expired(expires: u64) -> bool;
@@ -147,8 +148,8 @@ impl Cache {
 impl<E: Expiry> Store<E> {
     async fn load<P: AsRef<Path>>(path: P) -> Result<Store<E>, Error> {
         let path = path.as_ref();
-        let entries = if path.exists() {
-            let bytes = fs::read(&path).await.map_err(Error::Io)?;
+        let entries = if file_exists(path) {
+            let bytes = read_file(&path).await.map_err(Error::Io)?;
             flexbuffers::from_slice(&bytes).map_err(Error::Deserialize)?
         } else {
             HashMap::new()
@@ -212,7 +213,7 @@ impl<E: Expiry> Store<E> {
             *self.dirty.write().await = false;
             let entries = self.entries.read().await;
             let data = flexbuffers::to_vec(&*entries).map_err(Error::Serialize)?;
-            fs::write(&self.path, data).await.map_err(Error::Io)?;
+            write_file(&self.path, data).await.map_err(Error::Io)?;
         }
 
         Ok(())

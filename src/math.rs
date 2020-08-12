@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
-use std::ops::{Add, Div, Mul, Sub};
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
 macro_rules! implement_vector{
-    (operator, $name:ident, $op:ident, $func:ident, $($field:ident),*) => {
+    (operator, $name:ident, $op:ident, $func:ident, $op_assign:ident, $func_assign:ident, $($field:ident),*) => {
         impl<T: $op<Output = T>> $op for $name<T> {
             type Output = Self;
 
@@ -23,6 +23,23 @@ macro_rules! implement_vector{
                 }
             }
         }
+
+        impl<T: $op<Output = T> + Clone> $op_assign for $name<T> {
+            fn $func_assign(&mut self, other: Self) {
+                *self = $name {
+                    $($field: self.$field.clone().$func(other.$field),)*
+                }
+            }
+        }
+
+        impl<T: $op<Output = T> + Clone> $op_assign<T> for $name<T> {
+            fn $func_assign(&mut self, other: T) {
+                *self = $name {
+                    $($field: self.$field.clone().$func(other.clone()),)*
+                }
+            }
+        }
+
     };
     ($name:ident, $short_name: ident, $($field:ident),*) => {
         #[repr(C)]
@@ -146,10 +163,10 @@ macro_rules! implement_vector{
             }
         }
 
-        implement_vector!(operator, $name, Add, add, $($field),*);
-        implement_vector!(operator, $name, Sub, sub, $($field),*);
-        implement_vector!(operator, $name, Mul, mul, $($field),*);
-        implement_vector!(operator, $name, Div, div, $($field),*);
+        implement_vector!(operator, $name, Add, add, AddAssign, add_assign, $($field),*);
+        implement_vector!(operator, $name, Sub, sub, SubAssign, sub_assign, $($field),*);
+        implement_vector!(operator, $name, Mul, mul, MulAssign, mul_assign, $($field),*);
+        implement_vector!(operator, $name, Div, div, DivAssign, div_assign, $($field),*);
     }
 }
 

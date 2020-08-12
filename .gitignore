@@ -1,6 +1,7 @@
 /target
-fonts
-local-cache
+/fonts
+/local-cache
+/pkg
 eve-profile.json
 eve-static.dat
 eve-dynamic.dat

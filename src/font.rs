@@ -1,19 +1,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+use crate::gfx::TextVertex;
 use crate::math;
+use crate::platform::{GraphicsBackend, RgbTexture, U8};
 
 pub const EVE_SANS_NEUE: &[u8] = include_bytes!("../fonts/evesansneue-regular.otf");
 pub const EVE_SANS_NEUE_BOLD: &[u8] = include_bytes!("../fonts/evesansneue-bold.otf");
 pub const NANUMGOTHIC: &[u8] = include_bytes!("../fonts/nanumgothic.ttf");
-
-#[derive(Clone, Copy, Debug)]
-pub struct TextVertex {
-    position: math::V2<f32>,
-    uv: math::V2<f32>,
-    color: math::V4<f32>,
-}
-glium::implement_vertex!(TextVertex, position, uv, color);
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct FontId(pub usize);
@@ -26,14 +20,14 @@ impl From<FontId> for usize {
 
 pub struct FontCache {
     cache: RefCell<rusttype::gpu_cache::Cache<'static>>,
-    cache_texture: glium::Texture2d,
+    cache_texture: RgbTexture<U8>,
     fonts: Vec<rusttype::Font<'static>>,
     font_ids: HashMap<&'static str, FontId>,
 }
 
 impl FontCache {
-    pub fn new(display: &glium::Display, cache_width: u32, cache_height: u32) -> Self {
-        let cache_texture = glium::Texture2d::empty(display, cache_width, cache_height).unwrap();
+    pub fn new(display: &GraphicsBackend, cache_width: u32, cache_height: u32) -> Self {
+        let cache_texture = display.create_texture(cache_width, cache_height);
         let cache = rusttype::gpu_cache::Cache::builder()
             .dimensions(cache_width, cache_height)
             .position_tolerance(1.0)
@@ -66,15 +60,8 @@ impl FontCache {
         self.fonts.get(font.0).cloned()
     }
 
-    pub fn texture(&self) -> &glium::Texture2d {
+    pub fn texture(&self) -> &RgbTexture<U8> {
         &self.cache_texture
-    }
-
-    pub fn sampler(&self) -> glium::uniforms::Sampler<glium::Texture2d> {
-        self.texture()
-            .sampled()
-            .magnify_filter(glium::uniforms::MagnifySamplerFilter::Linear)
-            .minify_filter(glium::uniforms::MinifySamplerFilter::Linear)
     }
 
     pub fn layout(
@@ -162,9 +149,11 @@ impl FontCache {
 
     pub fn draw(
         &self,
+        display: &GraphicsBackend,
         text: &PositionedTextSpan,
         buffer: &mut Vec<TextVertex>,
         window_size: math::V2<f32>,
+        ui_scale: f32,
     ) {
         for (font, glyph) in text
             .nodes
@@ -179,20 +168,12 @@ impl FontCache {
         self.cache
             .borrow_mut()
             .cache_queued(|region, data| {
-                let rect = glium::Rect {
-                    left: region.min.x,
-                    bottom: region.min.y,
-                    width: region.width(),
-                    height: region.height(),
-                };
+                let region = math::Rect::new(
+                    math::v2(region.min.x, region.min.y),
+                    math::v2(region.max.x, region.max.y),
+                );
 
-                let img_data = glium::texture::RawImage2d {
-                    data: data.into(),
-                    width: region.width(),
-                    height: region.height(),
-                    format: glium::texture::ClientFormat::U8,
-                };
-                self.cache_texture.write(rect, img_data);
+                display.update_texture(self.texture(), region, data);
             })
             .unwrap();
 
@@ -225,7 +206,10 @@ impl FontCache {
                         .zip(tex_rect.triangle_list_iter())
                     {
                         buffer.push(TextVertex {
-                            position: math::v2(position.x + 3.0, window_size.y - position.y - 3.0),
+                            position: math::v2(
+                                position.x + (3.0 * ui_scale),
+                                window_size.y - position.y - (3.0 * ui_scale),
+                            ),
                             uv,
                             color: math::V3::fill(0.01).expand(color.w),
                         });

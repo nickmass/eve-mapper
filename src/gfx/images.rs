@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 
-use glium::texture::SrgbTexture2d;
-
 use super::QuadVertex;
 use crate::math;
+use crate::platform::{GraphicsBackend, SrgbTexture, U8U8U8U8};
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Image {
@@ -14,14 +13,14 @@ pub enum Image {
 pub struct Images {
     cache_width: u32,
     cache_height: u32,
-    cache_texture: SrgbTexture2d,
+    cache_texture: SrgbTexture<U8U8U8U8>,
     slots: RwLock<HashMap<Image, math::Rect<u32>>>,
     cursor: Mutex<math::V2<u32>>,
 }
 
 impl Images {
-    pub fn new(display: &glium::Display, cache_width: u32, cache_height: u32) -> Self {
-        let cache_texture = SrgbTexture2d::empty(display, cache_width, cache_height).unwrap();
+    pub fn new(display: &GraphicsBackend, cache_width: u32, cache_height: u32) -> Self {
+        let cache_texture = display.create_texture(cache_width, cache_height);
 
         Images {
             cache_width,
@@ -32,22 +31,20 @@ impl Images {
         }
     }
 
-    pub fn texture(&self) -> &SrgbTexture2d {
+    pub fn texture(&self) -> &SrgbTexture<U8U8U8U8> {
         &self.cache_texture
-    }
-
-    pub fn sampler(&self) -> glium::uniforms::Sampler<SrgbTexture2d> {
-        self.texture()
-            .sampled()
-            .magnify_filter(glium::uniforms::MagnifySamplerFilter::Linear)
-            .minify_filter(glium::uniforms::MinifySamplerFilter::Linear)
     }
 
     pub fn contains(&self, image: Image) -> bool {
         self.slots.read().unwrap().contains_key(&image)
     }
 
-    pub fn load(&self, image: Image, data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn load(
+        &self,
+        display: &GraphicsBackend,
+        image: Image,
+        data: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if self.contains(image) {
             return Ok(());
         }
@@ -107,26 +104,20 @@ impl Images {
             }
         }
 
-        let rect = glium::Rect {
-            left: cursor.x,
-            bottom: cursor.y,
-            width,
-            height,
-        };
+        {
+            let cursor = cursor.clone();
+            display.update_texture(
+                self.texture(),
+                math::Rect::new(cursor, cursor + math::v2(width, height)),
+                &image_data,
+            );
 
-        let img_data = glium::texture::RawImage2d {
-            data: image_data.into(),
-            width: width as u32,
-            height: height as u32,
-            format: glium::texture::ClientFormat::U8U8U8U8,
-        };
-        self.cache_texture.write(rect, img_data);
-
-        let mut slots = self.slots.write().unwrap();
-        slots.insert(
-            image,
-            math::Rect::new(cursor.clone(), cursor.clone() + math::v2(width, height)),
-        );
+            let mut slots = self.slots.write().unwrap();
+            slots.insert(
+                image,
+                math::Rect::new(cursor.clone(), cursor.clone() + math::v2(width, height)),
+            );
+        }
 
         cursor.x += width;
 

@@ -1,9 +1,9 @@
 use crate::math;
 
 use super::{
-    font, images, DataEvent, GraphicsContext, GraphicsState, InputState, MapEvent, QuadVertex,
-    RouteEvent, UserEvent, Widget,
+    font, images, DataEvent, GraphicsContext, InputState, MapEvent, RouteEvent, UserEvent, Widget,
 };
+use crate::platform::Frame;
 
 use font::TextAnchor;
 
@@ -95,7 +95,11 @@ impl<'a> Widget for InfoBox<'a> {
                 let image = images::Image::AllianceLogo(alliance.alliance_id);
                 if !self.context.images.contains(image) {
                     if let Some(data) = world.alliance_logo(alliance.alliance_id) {
-                        match self.context.images.load(image, &data) {
+                        match self
+                            .context
+                            .images
+                            .load(&self.context.display, image, &data)
+                        {
                             Err(e) => {
                                 log::error!("image load error {:?}: {:?}", image, e);
                                 None
@@ -301,106 +305,32 @@ impl<'a> Widget for InfoBox<'a> {
             }
         }
 
-        self.context.request_redraw();
+        self.context.request_redraw("info dirty");
         self.dirty = false;
     }
 
-    fn draw<S: glium::Surface>(&mut self, graphics_state: &GraphicsState, frame: &mut S) {
+    fn draw(&mut self, frame: &mut Frame) {
         if let Some(background) = self.background_rect {
-            let draw_params = glium::DrawParameters {
-                blend: glium::Blend {
-                    color: glium::BlendingFunction::Addition {
-                        source: glium::LinearBlendingFactor::SourceAlpha,
-                        destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
-                    },
-                    alpha: glium::BlendingFunction::Addition {
-                        source: glium::LinearBlendingFactor::Zero,
-                        destination: glium::LinearBlendingFactor::One,
-                    },
-                    constant_value: (1.0, 1.0, 1.0, 1.0),
-                },
-                ..Default::default()
-            };
-
-            let uniforms = glium::uniform! {
-                window_size: self.window_size,
-                texture_atlas: self.context.images.sampler(),
-                textured: false,
-                color: math::v4(0.02, 0.02, 0.02, 0.85)
-            };
-
-            let mut rect_buf = Vec::new();
-            for v in background.triangle_list_iter() {
-                rect_buf.push(QuadVertex {
-                    position: v,
-                    uv: math::v2(0.0, 0.0),
-                })
-            }
-
-            let rect_data_buf = glium::VertexBuffer::new(&self.context.display, &rect_buf).unwrap();
-
-            let draw_res = frame.draw(
-                &rect_data_buf,
-                &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                &graphics_state.quad_program,
-                &uniforms,
-                &draw_params,
+            self.context.display.draw_quad(
+                frame,
+                &self.context.images,
+                math::v4(0.02, 0.02, 0.02, 0.85),
+                background,
             );
-            if let Err(error) = draw_res {
-                log::error!("info background draw error: {:?}", error);
-            }
 
             if let Some((image, position)) = self.image {
-                let uniforms = glium::uniform! {
-                    window_size: self.window_size,
-                    texture_atlas: self.context.images.sampler(),
-                    textured: true,
-                    color: math::V4::fill(1.0)
-                };
-
-                let mut image_buf = Vec::new();
-                self.context.images.draw(&mut image_buf, image, position);
-
-                let image_data_buf =
-                    glium::VertexBuffer::new(&self.context.display, &image_buf).unwrap();
-                let draw_res = frame.draw(
-                    &image_data_buf,
-                    &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                    &graphics_state.quad_program,
-                    &uniforms,
-                    &draw_params,
-                );
-                if let Err(error) = draw_res {
-                    log::error!("info image draw error: {:?}", error);
-                }
+                self.context
+                    .display
+                    .draw_image(frame, &self.context.images, image, position);
             }
 
             if self.text_spans.len() > 0 {
-                let uniforms = glium::uniform! {
-                    window_size: self.window_size,
-                    font_atlas: self.context.font_cache.sampler()
-                };
-
-                let mut text_buf = Vec::new();
-
-                for text in &self.text_spans {
-                    self.context
-                        .font_cache
-                        .draw(text, &mut text_buf, self.window_size);
-                }
-
-                let text_data_buf =
-                    glium::VertexBuffer::new(&self.context.display, &text_buf).unwrap();
-                let draw_res = frame.draw(
-                    &text_data_buf,
-                    &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                    &graphics_state.text_program,
-                    &uniforms,
-                    &draw_params,
+                self.context.display.draw_text(
+                    frame,
+                    &self.context.font_cache,
+                    &self.text_spans,
+                    self.context.ui_scale(),
                 );
-                if let Err(error) = draw_res {
-                    log::error!("info text draw error: {:?}", error);
-                }
             }
         }
     }

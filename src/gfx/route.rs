@@ -1,8 +1,8 @@
 use crate::math;
+use crate::platform::Frame;
 
 use super::{
-    font, DataEvent, GraphicsContext, GraphicsState, InputState, QuadVertex, QueryEvent,
-    RouteEvent, UserEvent, Widget,
+    font, DataEvent, GraphicsContext, InputState, QueryEvent, RouteEvent, UserEvent, Widget,
 };
 
 use font::TextAnchor;
@@ -15,6 +15,7 @@ pub struct RouteBox<'a> {
     node_bounds: Vec<(i32, math::Rect<i32>)>,
     background_rect: Option<math::Rect<f32>>,
     dirty: bool,
+    selected_system: Option<i32>,
 }
 
 impl<'a> RouteBox<'a> {
@@ -27,23 +28,22 @@ impl<'a> RouteBox<'a> {
             node_bounds: Vec::new(),
             background_rect: None,
             dirty: true,
+            selected_system: None,
         }
     }
 
-    pub fn selected_system(&self, input_state: &InputState) {
-        let mut matched = false;
+    pub fn selected_system(&mut self, input_state: &InputState) {
+        let mut system = None;
         for (system_id, bounds) in &self.node_bounds {
             if bounds.as_f32().contains(input_state.mouse_position) {
-                input_state.send_user_event(UserEvent::RouteEvent(
-                    RouteEvent::SelectedSystemChanged(Some(*system_id)),
-                ));
-                matched = true;
+                system = Some(*system_id);
             }
         }
 
-        if !matched {
+        if system != self.selected_system {
+            self.selected_system = system;
             input_state.send_user_event(UserEvent::RouteEvent(RouteEvent::SelectedSystemChanged(
-                None,
+                self.selected_system,
             )));
         }
     }
@@ -226,81 +226,26 @@ impl<'a> Widget for RouteBox<'a> {
         }
 
         self.selected_system(input_state);
-        self.context.request_redraw();
+        self.context.request_redraw("route dirty");
         self.dirty = false;
     }
 
-    fn draw<S: glium::Surface>(&mut self, graphics_state: &GraphicsState, frame: &mut S) {
+    fn draw(&mut self, frame: &mut Frame) {
         if let Some(background) = self.background_rect {
-            let draw_params = glium::DrawParameters {
-                blend: glium::Blend {
-                    color: glium::BlendingFunction::Addition {
-                        source: glium::LinearBlendingFactor::SourceAlpha,
-                        destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
-                    },
-                    alpha: glium::BlendingFunction::Addition {
-                        source: glium::LinearBlendingFactor::Zero,
-                        destination: glium::LinearBlendingFactor::One,
-                    },
-                    constant_value: (1.0, 1.0, 1.0, 1.0),
-                },
-                ..Default::default()
-            };
-
-            let uniforms = glium::uniform! {
-                window_size: self.window_size,
-                texture_atlas: self.context.images.sampler(),
-                textured: false,
-                color: math::v4(0.02, 0.02, 0.02, 0.85)
-            };
-
-            let mut rect_buf = Vec::new();
-            for v in background.triangle_list_iter() {
-                rect_buf.push(QuadVertex {
-                    position: v,
-                    uv: math::v2(0.0, 0.0),
-                })
-            }
-
-            let rect_data_buf = glium::VertexBuffer::new(&self.context.display, &rect_buf).unwrap();
-
-            let draw_res = frame.draw(
-                &rect_data_buf,
-                &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                &graphics_state.quad_program,
-                &uniforms,
-                &draw_params,
+            self.context.display.draw_quad(
+                frame,
+                &self.context.images,
+                math::v4(0.02, 0.02, 0.02, 0.85),
+                background,
             );
-            if let Err(error) = draw_res {
-                log::error!("route background draw error: {:?}", error);
-            }
 
             if self.text_spans.len() > 0 {
-                let uniforms = glium::uniform! {
-                    window_size: self.window_size,
-                    font_atlas: self.context.font_cache.sampler()
-                };
-
-                let mut text_buf = Vec::new();
-
-                for text in &self.text_spans {
-                    self.context
-                        .font_cache
-                        .draw(text, &mut text_buf, self.window_size);
-                }
-
-                let text_data_buf =
-                    glium::VertexBuffer::new(&self.context.display, &text_buf).unwrap();
-                let draw_res = frame.draw(
-                    &text_data_buf,
-                    &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                    &graphics_state.text_program,
-                    &uniforms,
-                    &draw_params,
+                self.context.display.draw_text(
+                    frame,
+                    &self.context.font_cache,
+                    &self.text_spans,
+                    self.context.ui_scale(),
                 );
-                if let Err(error) = draw_res {
-                    log::error!("route text draw error: {:?}", error);
-                }
             }
         }
     }

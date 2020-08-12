@@ -1,19 +1,18 @@
 use async_std::sync::RwLock as RwLockAsync;
-use async_std::task::{sleep, spawn};
+use async_std::task::sleep;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::future::FutureExt;
 use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt;
 use petgraph::Graph;
-use winit::event_loop::EventLoopProxy;
 
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::sync::{Arc, RwLock};
 
 use crate::esi;
-use crate::gfx::{DataEvent, UserEvent};
+use crate::gfx::{DataEvent, UserEvent, UserEventSender};
 use crate::math;
+use crate::platform::{read_file, spawn, EventSender};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Edge {
@@ -109,12 +108,12 @@ pub struct World {
     alliances: Arc<RwLock<HashMap<i32, esi::GetAlliance>>>,
     corporations: Arc<RwLock<HashMap<i32, esi::GetCorporation>>>,
     alliance_logos: Arc<RwLock<HashMap<i32, Arc<Vec<u8>>>>>,
-    event_proxy: EventLoopProxy<UserEvent>,
+    event_sender: EventSender,
     update_sender: Option<UnboundedSender<UpdateRequest>>,
 }
 
 impl World {
-    pub fn new(event_proxy: EventLoopProxy<UserEvent>) -> Self {
+    pub fn new(event_sender: EventSender) -> Self {
         World {
             systems: HashMap::new(),
             systems_by_name: HashMap::new(),
@@ -131,7 +130,7 @@ impl World {
             alliances: Arc::new(RwLock::new(HashMap::new())),
             corporations: Arc::new(RwLock::new(HashMap::new())),
             alliance_logos: Arc::new(RwLock::new(HashMap::new())),
-            event_proxy,
+            event_sender,
             update_sender: None,
         }
     }
@@ -189,25 +188,6 @@ impl World {
             }
             None
         }
-    }
-
-    fn push_system(&mut self, system: esi::GetUniverseSystem) {
-        self.systems_by_name
-            .insert(system.name.clone(), system.system_id);
-        self.systems.insert(system.system_id, system);
-    }
-
-    fn push_stargate(&mut self, stargate: esi::GetUniverseStargate) {
-        self.stargates.insert(stargate.stargate_id, stargate);
-    }
-
-    fn push_constellation(&mut self, constellation: esi::GetUniverseConstellation) {
-        self.constellations
-            .insert(constellation.constellation_id, constellation);
-    }
-
-    fn push_region(&mut self, region: esi::GetUniverseRegion) {
-        self.regions.insert(region.region_id, region);
     }
 
     pub fn stats(&self, system_id: i32) -> Option<Stats> {
@@ -651,63 +631,12 @@ impl World {
         }
     }
 
-    pub async fn load(&mut self, client: &esi::Client) -> Result<(), ()> {
-        let regions = client.get_universe_regions();
-        let constellations = client.get_universe_constellations();
-        let systems = client.get_universe_systems();
-
-        let (regions, constellations, systems) = futures::join!(regions, constellations, systems);
-
-        let regions = regions.unwrap();
-        let constellations = constellations.unwrap();
-        let systems = systems.unwrap();
-
-        let mut all_systems = HashMap::new();
-        let mut all_stargates = HashMap::new();
-        let mut all_stargate_ids = Vec::new();
-
-        let regions_fut: FuturesUnordered<_> = regions
-            .iter()
-            .map(|region_id| client.get_universe_region(*region_id))
-            .collect();
-
-        let constellations_fut: FuturesUnordered<_> = constellations
-            .iter()
-            .map(|constellation_id| client.get_universe_constellation(*constellation_id))
-            .collect();
-
-        let systems_fut: FuturesUnordered<_> = systems
-            .iter()
-            .map(|system_id| client.get_universe_system(*system_id))
-            .collect();
-
-        let (regions, constellations, systems): (Vec<_>, Vec<_>, Vec<_>) = futures::join!(
-            regions_fut.map(Result::unwrap).collect(),
-            constellations_fut.map(Result::unwrap).collect(),
-            systems_fut.map(Result::unwrap).collect(),
-        );
-
-        for region in regions {
-            self.push_region(region);
-        }
-
-        for constellation in constellations {
-            self.push_constellation(constellation);
-        }
-
-        for system in systems {
-            if let Some(stargates) = &system.stargates {
-                all_stargate_ids.extend_from_slice(stargates);
-            }
-
-            let node_id = self.graph.add_node(Node::System {
-                system: system.system_id,
-            });
-            all_systems.insert(system.system_id, node_id);
+    pub fn import(&mut self, galaxy: Galaxy) {
+        for system_id in galaxy.systems.keys() {
             {
                 let mut stats = self.system_stats.write().unwrap();
                 stats.insert(
-                    system.system_id,
+                    *system_id,
                     Stats {
                         jumps: 0,
                         npc_kills: 0,
@@ -716,188 +645,30 @@ impl World {
                     },
                 );
             }
-
-            self.push_system(system);
         }
+        let Galaxy {
+            systems,
+            systems_by_name,
+            stargates,
+            constellations,
+            regions,
+            graph,
+            client,
+        } = galaxy;
 
-        let stargates_fut: FuturesUnordered<_> = all_stargate_ids
-            .iter()
-            .map(|stargate_id| client.get_universe_stargate(*stargate_id))
-            .collect();
+        self.systems = systems;
+        self.systems_by_name = systems_by_name;
+        self.stargates = stargates;
+        self.constellations = constellations;
+        self.regions = regions;
+        self.graph = graph;
 
-        let stargates: Vec<_> = stargates_fut.map(Result::unwrap).collect().await;
-
-        for stargate in stargates {
-            let node_id = self.graph.add_node(Node::Stargate {
-                stargate: stargate.stargate_id,
-                source: stargate.system_id,
-                destination: stargate.destination.system_id,
-            });
-            all_stargates.insert(stargate.stargate_id, node_id);
-            self.push_stargate(stargate);
-        }
-
-        for system in self.systems.values() {
-            let system_node = all_systems.get(&system.system_id).unwrap();
-            let system_position: math::V3<f64> =
-                math::V3::new(system.position.x, system.position.y, system.position.z);
-
-            if let Some(system_stargates) = &system.stargates {
-                for stargate_id in system_stargates {
-                    let stargate = self.stargates.get(stargate_id).unwrap();
-                    let stargate_node = all_stargates.get(&stargate_id).unwrap();
-                    let stargate_position: math::V3<f64> = math::V3::new(
-                        stargate.position.x,
-                        stargate.position.y,
-                        stargate.position.z,
-                    );
-
-                    let edge = Edge::Warp {
-                        system: system.system_id,
-                        distance: system_position.distance(&stargate_position) / 1e12,
-                    };
-
-                    self.graph
-                        .add_edge(system_node.clone(), stargate_node.clone(), edge);
-
-                    for stargate_id_inner in system_stargates {
-                        if stargate_id >= stargate_id_inner {
-                            continue;
-                        }
-
-                        let stargate_inner_node = all_stargates.get(&stargate_id_inner).unwrap();
-                        let stargate_inner = self.stargates.get(stargate_id_inner).unwrap();
-                        let stargate_inner_position: math::V3<f64> = math::V3::new(
-                            stargate_inner.position.x,
-                            stargate_inner.position.y,
-                            stargate_inner.position.z,
-                        );
-
-                        let edge = Edge::Warp {
-                            system: system.system_id,
-                            distance: stargate_position.distance(&stargate_inner_position) / 1e12,
-                        };
-
-                        self.graph.add_edge(
-                            stargate_node.clone(),
-                            stargate_inner_node.clone(),
-                            edge,
-                        );
-                    }
-
-                    if stargate.system_id >= stargate.destination.system_id {
-                        continue;
-                    }
-
-                    let destination_node = all_stargates.get(&stargate.destination.stargate_id);
-
-                    if let Some(destination_node) = destination_node {
-                        let edge = Edge::Jump {
-                            left: stargate.system_id,
-                            right: stargate.destination.system_id,
-                        };
-
-                        self.graph
-                            .add_edge(stargate_node.clone(), destination_node.clone(), edge);
-                    }
-                }
-            }
-        }
-
-        let mut bridges = std::fs::File::open("bridges.tsv").unwrap();
-        let mut bridges_tsv = String::new();
-        bridges.read_to_string(&mut bridges_tsv).unwrap();
-
-        let mut jb_id = 0;
-        for line in bridges_tsv.lines() {
-            let line_parts: Vec<_> = line.split('\t').collect();
-            let left = line_parts[1].split(' ').next().unwrap();
-            let right = line_parts[2].split(' ').next().unwrap();
-
-            let left = self.system_by_name(left).cloned().unwrap();
-            let right = self.system_by_name(right).cloned().unwrap();
-
-            let left_jb_id = jb_id;
-            let right_jb_id = jb_id + 1;
-            jb_id += 2;
-            let left_jb = esi::GetUniverseStargate {
-                stargate_id: left_jb_id,
-                name: format!("Jump Gate ({} --> {})", left.name, right.name),
-                destination: esi::GetUniverseStargateDestination {
-                    stargate_id: right_jb_id,
-                    system_id: right.system_id,
-                },
-                position: esi::Position {
-                    x: left.position.x,
-                    y: left.position.y,
-                    z: left.position.z,
-                },
-                system_id: left.system_id,
-            };
-
-            let right_jb = esi::GetUniverseStargate {
-                stargate_id: right_jb_id,
-                name: format!("Jump Gate ({} --> {})", right.name, left.name),
-                destination: esi::GetUniverseStargateDestination {
-                    stargate_id: left_jb_id,
-                    system_id: left.system_id,
-                },
-                position: esi::Position {
-                    x: right.position.x,
-                    y: right.position.y,
-                    z: right.position.z,
-                },
-                system_id: right.system_id,
-            };
-
-            self.stargates.insert(left_jb_id, left_jb);
-            let left_node = Node::JumpGate {
-                stargate: left_jb_id,
-                source: left.system_id,
-                destination: right.system_id,
-            };
-            let left_node_id = self.graph.add_node(left_node);
-            all_stargates.insert(left_jb_id, left_node_id);
-            let left_system_node = all_systems.get(&left.system_id).unwrap();
-
-            self.stargates.insert(right_jb_id, right_jb);
-            let right_node = Node::JumpGate {
-                stargate: right_jb_id,
-                source: right.system_id,
-                destination: left.system_id,
-            };
-            let right_node_id = self.graph.add_node(right_node);
-            all_stargates.insert(right_jb_id, right_node_id);
-            let right_system_node = all_systems.get(&right.system_id).unwrap();
-
-            let left_warp = Edge::Warp {
-                system: left.system_id,
-                distance: 1.0,
-            };
-
-            let right_warp = Edge::Warp {
-                system: right.system_id,
-                distance: 1.0,
-            };
-
-            let edge = Edge::JumpBridge {
-                left: left.system_id,
-                right: right.system_id,
-            };
-
-            self.graph
-                .add_edge(left_node_id.clone(), left_system_node.clone(), left_warp);
-            self.graph
-                .add_edge(right_node_id.clone(), right_system_node.clone(), right_warp);
-            self.graph
-                .add_edge(left_node_id.clone(), right_node_id.clone(), edge);
-        }
-
+        let _ = self
+            .event_sender
+            .send_user_event(UserEvent::DataEvent(DataEvent::GalaxyImported));
         let (tx, rx) = unbounded();
         self.update_sender = Some(tx);
         self.spawn_background_updater(client.clone(), rx);
-
-        Ok(())
     }
 
     fn spawn_background_updater(
@@ -905,7 +676,7 @@ impl World {
         client: esi::Client,
         mut update_receiver: UnboundedReceiver<UpdateRequest>,
     ) {
-        let event_proxy = self.event_proxy.clone();
+        let event_sender = self.event_sender.clone();
         let player_system = self.player_system.clone();
         let system_stats = self.system_stats.clone();
         let sov_standings = self.sov.clone();
@@ -915,7 +686,7 @@ impl World {
         let alliance_logos = self.alliance_logos.clone();
         spawn({
             let client = client.clone();
-            let event_proxy = event_proxy.clone();
+            let event_sender = event_sender.clone();
             async move {
                 loop {
                     let update = update_receiver.next().await;
@@ -925,8 +696,8 @@ impl World {
                             let logo = Arc::new(logo);
 
                             alliance_logos.write().unwrap().insert(alliance_id, logo);
-                            let _ = event_proxy
-                                .send_event(UserEvent::DataEvent(DataEvent::ImageLoaded));
+                            event_sender
+                                .send_user_event(UserEvent::DataEvent(DataEvent::ImageLoaded));
                         }
                         Some(UpdateRequest::SendRouteToClient(player_location, route)) => {
                             if route.len() > 0 {
@@ -983,7 +754,7 @@ impl World {
                     let mut current_location = player_system.write().unwrap();
                     if location != *current_location {
                         *current_location = location;
-                        let _ = event_proxy.send_event(UserEvent::DataEvent(
+                        event_sender.send_user_event(UserEvent::DataEvent(
                             DataEvent::CharacterLocationChanged(location),
                         ));
                     }
@@ -992,10 +763,10 @@ impl World {
                     World::load_system_stats(&system_stats, &client).await;
                     World::load_sov_standings(&sov_standings, &alliances, &corporations, &client)
                         .await;
-                    let _ = event_proxy
-                        .send_event(UserEvent::DataEvent(DataEvent::SovStandingsChanged));
-                    let _ =
-                        event_proxy.send_event(UserEvent::DataEvent(DataEvent::SystemStatsChanged));
+                    event_sender
+                        .send_user_event(UserEvent::DataEvent(DataEvent::SovStandingsChanged));
+                    event_sender
+                        .send_user_event(UserEvent::DataEvent(DataEvent::SystemStatsChanged));
                 }
                 sleep(std::time::Duration::from_secs(poll_interval)).await;
                 counter += poll_interval;
@@ -1033,5 +804,287 @@ impl World {
 
     pub fn location(&self) -> Option<i32> {
         *self.player_system.read().unwrap()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Galaxy {
+    systems: HashMap<i32, esi::GetUniverseSystem>,
+    systems_by_name: HashMap<String, i32>,
+    stargates: HashMap<i32, esi::GetUniverseStargate>,
+    constellations: HashMap<i32, esi::GetUniverseConstellation>,
+    regions: HashMap<i32, esi::GetUniverseRegion>,
+    graph: Graph<Node, Edge, petgraph::Undirected, u32>,
+    client: crate::esi::Client,
+}
+
+impl Galaxy {
+    pub async fn load() -> Self {
+        let profile = crate::oauth::load_or_authorize().await.unwrap();
+        let client = crate::esi::Client::new(profile).await;
+
+        let mut galaxy = Galaxy {
+            systems: HashMap::new(),
+            systems_by_name: HashMap::new(),
+            stargates: HashMap::new(),
+            constellations: HashMap::new(),
+            regions: HashMap::new(),
+            graph: Graph::new_undirected(),
+            client: client.clone(),
+        };
+
+        let regions = client.get_universe_regions();
+        let constellations = client.get_universe_constellations();
+        let systems = client.get_universe_systems();
+
+        let (regions, constellations, systems) = futures::join!(regions, constellations, systems);
+
+        let regions = regions.unwrap();
+        let constellations = constellations.unwrap();
+        let systems = systems.unwrap();
+
+        let mut all_systems = HashMap::new();
+        let mut all_stargates = HashMap::new();
+        let mut all_stargate_ids = Vec::new();
+
+        let regions_fut: FuturesUnordered<_> = regions
+            .iter()
+            .map(|region_id| client.get_universe_region(*region_id))
+            .collect();
+
+        let constellations_fut: FuturesUnordered<_> = constellations
+            .iter()
+            .map(|constellation_id| client.get_universe_constellation(*constellation_id))
+            .collect();
+
+        let systems_fut: FuturesUnordered<_> = systems
+            .iter()
+            .map(|system_id| client.get_universe_system(*system_id))
+            .collect();
+
+        let (regions, constellations, systems): (Vec<_>, Vec<_>, Vec<_>) = futures::join!(
+            regions_fut.map(Result::unwrap).collect(),
+            constellations_fut.map(Result::unwrap).collect(),
+            systems_fut.map(Result::unwrap).collect(),
+        );
+
+        for region in regions {
+            galaxy.regions.insert(region.region_id, region);
+        }
+
+        for constellation in constellations {
+            galaxy
+                .constellations
+                .insert(constellation.constellation_id, constellation);
+        }
+
+        for system in systems {
+            if let Some(stargates) = &system.stargates {
+                all_stargate_ids.extend_from_slice(stargates);
+            }
+
+            let node_id = galaxy.graph.add_node(Node::System {
+                system: system.system_id,
+            });
+            all_systems.insert(system.system_id, node_id);
+
+            galaxy
+                .systems_by_name
+                .insert(system.name.clone(), system.system_id);
+            galaxy.systems.insert(system.system_id, system);
+        }
+
+        let stargates_fut: FuturesUnordered<_> = all_stargate_ids
+            .iter()
+            .map(|stargate_id| client.get_universe_stargate(*stargate_id))
+            .collect();
+
+        let stargates: Vec<_> = stargates_fut.map(Result::unwrap).collect().await;
+
+        for stargate in stargates {
+            let node_id = galaxy.graph.add_node(Node::Stargate {
+                stargate: stargate.stargate_id,
+                source: stargate.system_id,
+                destination: stargate.destination.system_id,
+            });
+            all_stargates.insert(stargate.stargate_id, node_id);
+            galaxy.stargates.insert(stargate.stargate_id, stargate);
+        }
+
+        for system in galaxy.systems.values() {
+            let system_node = all_systems.get(&system.system_id).unwrap();
+            let system_position: math::V3<f64> =
+                math::V3::new(system.position.x, system.position.y, system.position.z);
+
+            if let Some(system_stargates) = &system.stargates {
+                for stargate_id in system_stargates {
+                    let stargate = galaxy.stargates.get(stargate_id).unwrap();
+                    let stargate_node = all_stargates.get(&stargate_id).unwrap();
+                    let stargate_position: math::V3<f64> = math::V3::new(
+                        stargate.position.x,
+                        stargate.position.y,
+                        stargate.position.z,
+                    );
+
+                    let edge = Edge::Warp {
+                        system: system.system_id,
+                        distance: system_position.distance(&stargate_position) / 1e12,
+                    };
+
+                    galaxy
+                        .graph
+                        .add_edge(system_node.clone(), stargate_node.clone(), edge);
+
+                    for stargate_id_inner in system_stargates {
+                        if stargate_id >= stargate_id_inner {
+                            continue;
+                        }
+
+                        let stargate_inner_node = all_stargates.get(&stargate_id_inner).unwrap();
+                        let stargate_inner = galaxy.stargates.get(stargate_id_inner).unwrap();
+                        let stargate_inner_position: math::V3<f64> = math::V3::new(
+                            stargate_inner.position.x,
+                            stargate_inner.position.y,
+                            stargate_inner.position.z,
+                        );
+
+                        let edge = Edge::Warp {
+                            system: system.system_id,
+                            distance: stargate_position.distance(&stargate_inner_position) / 1e12,
+                        };
+
+                        galaxy.graph.add_edge(
+                            stargate_node.clone(),
+                            stargate_inner_node.clone(),
+                            edge,
+                        );
+                    }
+
+                    if stargate.system_id >= stargate.destination.system_id {
+                        continue;
+                    }
+
+                    let destination_node = all_stargates.get(&stargate.destination.stargate_id);
+
+                    if let Some(destination_node) = destination_node {
+                        let edge = Edge::Jump {
+                            left: stargate.system_id,
+                            right: stargate.destination.system_id,
+                        };
+
+                        galaxy.graph.add_edge(
+                            stargate_node.clone(),
+                            destination_node.clone(),
+                            edge,
+                        );
+                    }
+                }
+            }
+        }
+
+        let bridges = read_file("bridges.tsv").await.unwrap();
+        let bridges_tsv = String::from_utf8(bridges).unwrap();
+
+        let mut jb_id = 0;
+        for line in bridges_tsv.lines() {
+            let line_parts: Vec<_> = line.split('\t').collect();
+            let left = line_parts[1].split(' ').next().unwrap();
+            let right = line_parts[2].split(' ').next().unwrap();
+
+            let left = galaxy
+                .systems_by_name
+                .get(left)
+                .and_then(|id| galaxy.systems.get(id))
+                .cloned()
+                .unwrap();
+            let right = galaxy
+                .systems_by_name
+                .get(right)
+                .and_then(|id| galaxy.systems.get(id))
+                .cloned()
+                .unwrap();
+
+            let left_jb_id = jb_id;
+            let right_jb_id = jb_id + 1;
+            jb_id += 2;
+            let left_jb = esi::GetUniverseStargate {
+                stargate_id: left_jb_id,
+                name: format!("Jump Gate ({} --> {})", left.name, right.name),
+                destination: esi::GetUniverseStargateDestination {
+                    stargate_id: right_jb_id,
+                    system_id: right.system_id,
+                },
+                position: esi::Position {
+                    x: left.position.x,
+                    y: left.position.y,
+                    z: left.position.z,
+                },
+                system_id: left.system_id,
+            };
+
+            let right_jb = esi::GetUniverseStargate {
+                stargate_id: right_jb_id,
+                name: format!("Jump Gate ({} --> {})", right.name, left.name),
+                destination: esi::GetUniverseStargateDestination {
+                    stargate_id: left_jb_id,
+                    system_id: left.system_id,
+                },
+                position: esi::Position {
+                    x: right.position.x,
+                    y: right.position.y,
+                    z: right.position.z,
+                },
+                system_id: right.system_id,
+            };
+
+            galaxy.stargates.insert(left_jb_id, left_jb);
+            let left_node = Node::JumpGate {
+                stargate: left_jb_id,
+                source: left.system_id,
+                destination: right.system_id,
+            };
+            let left_node_id = galaxy.graph.add_node(left_node);
+            all_stargates.insert(left_jb_id, left_node_id);
+            let left_system_node = all_systems.get(&left.system_id).unwrap();
+
+            galaxy.stargates.insert(right_jb_id, right_jb);
+            let right_node = Node::JumpGate {
+                stargate: right_jb_id,
+                source: right.system_id,
+                destination: left.system_id,
+            };
+            let right_node_id = galaxy.graph.add_node(right_node);
+            all_stargates.insert(right_jb_id, right_node_id);
+            let right_system_node = all_systems.get(&right.system_id).unwrap();
+
+            let left_warp = Edge::Warp {
+                system: left.system_id,
+                distance: 1.0,
+            };
+
+            let right_warp = Edge::Warp {
+                system: right.system_id,
+                distance: 1.0,
+            };
+
+            let edge = Edge::JumpBridge {
+                left: left.system_id,
+                right: right.system_id,
+            };
+
+            galaxy
+                .graph
+                .add_edge(left_node_id.clone(), left_system_node.clone(), left_warp);
+            galaxy
+                .graph
+                .add_edge(right_node_id.clone(), right_system_node.clone(), right_warp);
+            galaxy
+                .graph
+                .add_edge(left_node_id.clone(), right_node_id.clone(), edge);
+        }
+
+        log::info!("galaxy loaded");
+
+        galaxy
     }
 }

@@ -1,19 +1,21 @@
-use glium::glutin;
-use glium::Surface;
 use winit::event::{Event, MouseButton, VirtualKeyCode};
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::WindowBuilder;
 
 use std::cell::Cell;
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::font;
 use crate::math;
-use crate::shaders;
-use crate::world::{JumpType, World};
+use crate::platform::time::Instant;
+use crate::platform::{
+    create_event_proxy, spawn, EventReceiver, EventSender, Frame, GraphicsBackend,
+    DEFAULT_CONTROL_FLOW,
+};
+use crate::world::{Galaxy, JumpType, World};
 
-mod images;
+pub mod images;
 
 mod map;
 use map::Map;
@@ -39,6 +41,8 @@ pub enum DataEvent {
     SovStandingsChanged,
     SystemStatsChanged,
     ImageLoaded,
+    GalaxyLoaded(Galaxy),
+    GalaxyImported,
 }
 
 #[derive(Clone, Debug)]
@@ -60,7 +64,6 @@ pub enum QueryEvent {
 pub struct Window {
     event_loop: EventLoop<UserEvent>,
     user_state: UserState,
-    graphics_state: GraphicsState,
     graphics_context: GraphicsContext,
 }
 
@@ -69,7 +72,7 @@ struct UserState {
 }
 
 pub struct GraphicsContext {
-    pub display: glium::Display,
+    pub display: GraphicsBackend,
     pub ui_font: font::FontId,
     pub title_font: font::FontId,
     pub symbol_font: font::FontId,
@@ -79,27 +82,22 @@ pub struct GraphicsContext {
 }
 
 impl GraphicsContext {
-    pub fn request_redraw(&self) {
-        self.display.gl_window().window().request_redraw()
+    pub fn request_redraw(&self, cause: &'static str) {
+        log::debug!("requested redraw: {}", cause);
+        self.display.request_redraw()
     }
 
     pub fn set_ui_scale(&self, window_size: math::V2<f32>) {
-        self.ui_scale.set(window_size.y / 2160.0)
+        self.ui_scale.set(window_size.y / 2160.0);
     }
 
     pub fn ui_scale(&self) -> f32 {
         self.ui_scale.get()
     }
-}
 
-struct GraphicsState {
-    circle_model: glium::VertexBuffer<CircleVertex>,
-    system_program: glium::Program,
-    jump_program: glium::Program,
-    text_program: glium::Program,
-    quad_program: glium::Program,
-    shader_collection: shaders::ShaderCollection,
-    shader_version: usize,
+    pub fn window_size(&self) -> math::V2<f32> {
+        self.display.window_size()
+    }
 }
 
 impl Window {
@@ -109,53 +107,7 @@ impl Window {
             .with_inner_size(winit::dpi::LogicalSize::new(width, height))
             .with_transparent(false)
             .with_title("EVE Mapper");
-        let c_builder = glutin::ContextBuilder::new()
-            .with_vsync(true)
-            .with_gl_profile(glutin::GlProfile::Core)
-            .with_gl(glutin::GlRequest::Specific(glutin::Api::OpenGl, (4, 2)));
-
-        let display = glium::Display::new(w_builder, c_builder, &event_loop).unwrap();
-
-        let mut circle_verts = Vec::new();
-        circle_verts.push(CircleVertex {
-            position: math::v2(0.0, 0.0),
-        });
-
-        for i in 0..17 {
-            let n = ((2.0 * std::f32::consts::PI) / 16.0) * i as f32;
-            circle_verts.push(CircleVertex {
-                position: math::v2(n.sin(), n.cos()),
-            });
-        }
-
-        let circle_model = glium::VertexBuffer::new(&display, &circle_verts).unwrap();
-
-        let shader_collection = shaders::ShaderCollection::new();
-        let shader_version = shader_collection.version();
-
-        let systems_vert = shader_collection.get("systems_vert").unwrap();
-        let systems_frag = shader_collection.get("systems_frag").unwrap();
-
-        let jumps_vert = shader_collection.get("jumps_vert").unwrap();
-        let jumps_frag = shader_collection.get("jumps_frag").unwrap();
-
-        let text_vert = shader_collection.get("text_vert").unwrap();
-        let text_frag = shader_collection.get("text_frag").unwrap();
-
-        let quad_vert = shader_collection.get("quad_vert").unwrap();
-        let quad_frag = shader_collection.get("quad_frag").unwrap();
-
-        let system_program =
-            glium::Program::from_source(&display, &systems_vert, &systems_frag, None).unwrap();
-
-        let jump_program =
-            glium::Program::from_source(&display, &jumps_vert, &jumps_frag, None).unwrap();
-
-        let text_program =
-            glium::Program::from_source(&display, &text_vert, &text_frag, None).unwrap();
-
-        let quad_program =
-            glium::Program::from_source(&display, &quad_vert, &quad_frag, None).unwrap();
+        let display = GraphicsBackend::new(w_builder, &event_loop, width, height);
 
         let mut font_cache = font::FontCache::new(&display, 1024, 1024);
         let ui_font = font_cache.load("evesans", font::EVE_SANS_NEUE).unwrap();
@@ -165,16 +117,6 @@ impl Window {
         let symbol_font = font_cache.load("nanumgothic", font::NANUMGOTHIC).unwrap();
 
         let images = images::Images::new(&display, 4096, 4096);
-
-        let graphics_state = GraphicsState {
-            circle_model,
-            system_program,
-            jump_program,
-            text_program,
-            quad_program,
-            shader_collection,
-            shader_version,
-        };
 
         let graphics_context = GraphicsContext {
             display,
@@ -186,6 +128,8 @@ impl Window {
             ui_scale: Cell::new(1.0),
         };
 
+        graphics_context.set_ui_scale(math::V2::new(width, height).as_f32());
+
         let user_state = UserState {
             query_string: String::new(),
         };
@@ -193,22 +137,21 @@ impl Window {
         Window {
             event_loop,
             graphics_context,
-            graphics_state,
             user_state,
         }
     }
 
     pub fn run(self) -> ! {
-        let runtime = async_std::task::Builder::new();
-        let mut graphics_state = self.graphics_state;
+        let (event_sender, event_receiver) = create_event_proxy(&self.event_loop);
 
-        let event_proxy = self.event_loop.create_proxy();
-
-        let mut world = World::new(event_proxy.clone());
-        runtime.blocking(async {
-            let profile = crate::oauth::load_or_authorize().await.unwrap();
-            let client = crate::esi::Client::new(profile).await;
-            world.load(&client).await.unwrap();
+        let mut world = World::new(event_sender.clone());
+        spawn({
+            let event_sender = event_sender.clone();
+            async move {
+                let galaxy = crate::world::Galaxy::load().await;
+                let _ = event_sender
+                    .send_user_event(UserEvent::DataEvent(DataEvent::GalaxyLoaded(galaxy)));
+            }
         });
 
         let mut user_state = self.user_state;
@@ -218,22 +161,40 @@ impl Window {
             )
         };
 
-        let mut input_state = InputState::new(event_proxy);
+        let mut input_state = InputState::new(event_sender, event_receiver);
         let mut map = Map::new(&graphics_context);
         let mut info_box = InfoBox::new(&graphics_context);
         let mut route_box = RouteBox::new(&graphics_context);
         let mut frame_time = Instant::now();
         let mut render_time = Instant::now();
 
+        input_state.window_size = math::v2(
+            graphics_context.window_size().x as u32,
+            graphics_context.window_size().y as u32,
+        );
+
         self.event_loop.run(move |event, _window, control_flow| {
             use winit::event::*;
             match event {
                 Event::NewEvents(_) => {}
                 Event::MainEventsCleared => {
+                    //exists for wasm-web-sys builds where EventLoopProxys do not work and cannot send events to the main loop directly
+                    for event in input_state.event_receiver.user_event_iter() {
+                        match event {
+                            UserEvent::DataEvent(DataEvent::GalaxyLoaded(galaxy)) => {
+                                world.import(galaxy)
+                            }
+                            event => input_state.user_events.push(event),
+                        }
+                    }
+
                     let dt = frame_time.elapsed();
 
                     if let Some(window_size) = input_state.window_resized() {
                         graphics_context.set_ui_scale(window_size.as_f32());
+                        graphics_context
+                            .display
+                            .update_window_size(window_size.as_f32());
                     }
 
                     Window::update(
@@ -252,32 +213,22 @@ impl Window {
                     *control_flow = if input_state.closed() {
                         ControlFlow::Exit
                     } else {
-                        ControlFlow::Wait
+                        DEFAULT_CONTROL_FLOW
                     };
 
                     input_state.reset();
                 }
                 Event::RedrawRequested(..) => {
-                    Window::update_shaders(graphics_context, &mut graphics_state);
-
-                    let mut frame = graphics_context.display.draw();
-                    frame.clear_color(0.0 / 255.0, 0.0 / 255.0, 0.0 / 255.0, 1.0);
+                    let mut frame = graphics_context.display.begin();
+                    frame.clear_color(math::v4(0.0, 0.0, 0.0, 1.0));
                     frame.clear_depth(0.0);
 
-                    map.draw(&graphics_state, &mut frame);
-                    route_box.draw(&graphics_state, &mut frame);
-                    info_box.draw(&graphics_state, &mut frame);
-                    Window::draw(
-                        &mut frame,
-                        &graphics_context,
-                        &mut graphics_state,
-                        &mut user_state,
-                        &input_state,
-                    );
+                    map.draw(&mut frame);
+                    route_box.draw(&mut frame);
+                    info_box.draw(&mut frame);
+                    Window::draw(&mut frame, &graphics_context, &mut user_state, &input_state);
 
-                    if let Err(e) = frame.finish() {
-                        log::error!("gl swap buffer error: {:?}", e);
-                    }
+                    graphics_context.display.end(frame);
 
                     if render_time.elapsed().as_millis() > 1000 {
                         render_time = Instant::now();
@@ -285,6 +236,9 @@ impl Window {
 
                     //Send this event to ensure we run the updates for the next frame to continue any animations that may be ongoing
                     input_state.send_user_event(UserEvent::FrameDrawn);
+                }
+                Event::UserEvent(UserEvent::DataEvent(DataEvent::GalaxyLoaded(galaxy))) => {
+                    world.import(galaxy);
                 }
                 Event::RedrawEventsCleared => {}
                 Event::LoopDestroyed => {}
@@ -302,7 +256,7 @@ impl Window {
     ) {
         if input_state.text().len() > 0 {
             user_state.query_string.push_str(input_state.text());
-            graphics_context.request_redraw();
+            graphics_context.request_redraw("query text");
         }
 
         if input_state.was_key_down(VirtualKeyCode::Return) {
@@ -335,12 +289,12 @@ impl Window {
                 )))
             }
             user_state.query_string = String::new();
-            graphics_context.request_redraw();
+            graphics_context.request_redraw("query return");
         }
 
         if input_state.was_key_down(VirtualKeyCode::Back) {
             user_state.query_string.pop();
-            graphics_context.request_redraw();
+            graphics_context.request_redraw("query back");
         }
 
         if input_state.was_key_down(VirtualKeyCode::Escape) {
@@ -352,10 +306,9 @@ impl Window {
         }
     }
 
-    fn draw<S: Surface>(
-        frame: &mut S,
+    fn draw(
+        frame: &mut Frame,
         graphics_context: &GraphicsContext,
-        graphics_state: &mut GraphicsState,
         user_state: &mut UserState,
         input_state: &InputState,
     ) {
@@ -376,120 +329,12 @@ impl Window {
         }
 
         if pos_nodes.len() > 0 {
-            let uniforms = glium::uniform! {
-                window_size: window_size,
-                font_atlas: graphics_context.font_cache.sampler()
-            };
-
-            let draw_params = glium::DrawParameters {
-                blend: glium::Blend {
-                    color: glium::BlendingFunction::Addition {
-                        source: glium::LinearBlendingFactor::SourceAlpha,
-                        destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
-                    },
-                    alpha: glium::BlendingFunction::Addition {
-                        source: glium::LinearBlendingFactor::Zero,
-                        destination: glium::LinearBlendingFactor::One,
-                    },
-                    constant_value: (1.0, 1.0, 1.0, 1.0),
-                },
-                ..Default::default()
-            };
-
-            let mut text_buf = Vec::new();
-
-            for text in pos_nodes {
-                graphics_context
-                    .font_cache
-                    .draw(&text, &mut text_buf, window_size);
-            }
-
-            let text_data_buf =
-                glium::VertexBuffer::new(&graphics_context.display, &text_buf).unwrap();
-            frame
-                .draw(
-                    &text_data_buf,
-                    &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
-                    &graphics_state.text_program,
-                    &uniforms,
-                    &draw_params,
-                )
-                .unwrap();
-        }
-    }
-
-    fn update_shaders(graphics_context: &GraphicsContext, graphics_state: &mut GraphicsState) {
-        let new_version = graphics_state.shader_collection.version();
-        if new_version != graphics_state.shader_version {
-            let systems_vert = graphics_state
-                .shader_collection
-                .get("systems_vert")
-                .unwrap();
-            let systems_frag = graphics_state
-                .shader_collection
-                .get("systems_frag")
-                .unwrap();
-
-            let jumps_vert = graphics_state.shader_collection.get("jumps_vert").unwrap();
-            let jumps_frag = graphics_state.shader_collection.get("jumps_frag").unwrap();
-
-            let text_vert = graphics_state.shader_collection.get("text_vert").unwrap();
-            let text_frag = graphics_state.shader_collection.get("text_frag").unwrap();
-
-            let quad_vert = graphics_state.shader_collection.get("quad_vert").unwrap();
-            let quad_frag = graphics_state.shader_collection.get("quad_frag").unwrap();
-
-            let systems_program = glium::Program::from_source(
-                &graphics_context.display,
-                &systems_vert,
-                &systems_frag,
-                None,
+            graphics_context.display.draw_text(
+                frame,
+                &graphics_context.font_cache,
+                &pos_nodes,
+                graphics_context.ui_scale(),
             );
-
-            let jumps_program = glium::Program::from_source(
-                &graphics_context.display,
-                &jumps_vert,
-                &jumps_frag,
-                None,
-            );
-
-            let text_program = glium::Program::from_source(
-                &graphics_context.display,
-                &text_vert,
-                &text_frag,
-                None,
-            );
-
-            let quad_program = glium::Program::from_source(
-                &graphics_context.display,
-                &quad_vert,
-                &quad_frag,
-                None,
-            );
-
-            match systems_program {
-                Ok(program) => graphics_state.system_program = program,
-                Err(err) => log::error!("error creating systems shader: {:?}", err),
-            }
-
-            match jumps_program {
-                Ok(program) => graphics_state.jump_program = program,
-                Err(err) => log::error!("error creating jumps shader: {:?}", err),
-            }
-
-            match text_program {
-                Ok(program) => graphics_state.text_program = program,
-                Err(err) => log::error!("error creating text shader: {:?}", err),
-            }
-
-            match quad_program {
-                Ok(program) => graphics_state.quad_program = program,
-                Err(err) => log::error!("error creating quad shader: {:?}", err),
-            }
-
-            graphics_state.shader_version = new_version;
-
-            log::info!("shaders re-loaded");
         }
     }
 }
@@ -531,29 +376,26 @@ fn jump_type_color(jump: &JumpType) -> math::V3<f32> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct CircleVertex {
-    position: math::V2<f32>,
+pub struct CircleVertex {
+    pub position: math::V2<f32>,
 }
-glium::implement_vertex!(CircleVertex, position);
 
 #[derive(Clone, Copy, Debug)]
-struct LineVertex {
-    position: math::V3<f32>,
-    normal: math::V2<f32>,
-    color: math::V3<f32>,
+pub struct LineVertex {
+    pub position: math::V3<f32>,
+    pub normal: math::V2<f32>,
+    pub color: math::V3<f32>,
 }
-glium::implement_vertex!(LineVertex, position, normal, color);
 
 #[derive(Clone, Copy, Debug)]
-struct SystemData {
-    color: math::V4<f32>,
-    highlight: math::V4<f32>,
-    center: math::V2<f32>,
-    system_id: i32,
-    scale: f32,
-    radius: f32,
+pub struct SystemData {
+    pub color: math::V4<f32>,
+    pub highlight: math::V4<f32>,
+    pub center: math::V2<f32>,
+    pub system_id: i32,
+    pub scale: f32,
+    pub radius: f32,
 }
-glium::implement_vertex!(SystemData, color, highlight, center, scale, radius);
 
 #[derive(Debug, Copy, Clone)]
 pub struct QuadVertex {
@@ -561,79 +403,16 @@ pub struct QuadVertex {
     pub uv: math::V2<f32>,
 }
 
-glium::implement_vertex!(QuadVertex, position, uv);
-
-unsafe impl glium::vertex::Attribute for math::V2<f32> {
-    fn get_type() -> glium::vertex::AttributeType {
-        glium::vertex::AttributeType::F32F32
-    }
-}
-
-unsafe impl glium::vertex::Attribute for math::V3<f32> {
-    fn get_type() -> glium::vertex::AttributeType {
-        glium::vertex::AttributeType::F32F32F32
-    }
-}
-
-unsafe impl glium::vertex::Attribute for math::V4<f32> {
-    fn get_type() -> glium::vertex::AttributeType {
-        glium::vertex::AttributeType::F32F32F32F32
-    }
-}
-
-unsafe impl glium::vertex::Attribute for math::M3<f32> {
-    fn get_type() -> glium::vertex::AttributeType {
-        glium::vertex::AttributeType::F32x3x3
-    }
-}
-
-unsafe impl glium::vertex::Attribute for math::M4<f32> {
-    fn get_type() -> glium::vertex::AttributeType {
-        glium::vertex::AttributeType::F32x4x4
-    }
-}
-
-impl glium::uniforms::AsUniformValue for math::V2<f32> {
-    fn as_uniform_value(&self) -> glium::uniforms::UniformValue {
-        glium::uniforms::UniformValue::Vec2([self.x, self.y])
-    }
-}
-
-impl glium::uniforms::AsUniformValue for math::V3<f32> {
-    fn as_uniform_value(&self) -> glium::uniforms::UniformValue {
-        glium::uniforms::UniformValue::Vec3([self.x, self.y, self.z])
-    }
-}
-
-impl glium::uniforms::AsUniformValue for math::V4<f32> {
-    fn as_uniform_value(&self) -> glium::uniforms::UniformValue {
-        glium::uniforms::UniformValue::Vec4([self.x, self.y, self.z, self.w])
-    }
-}
-
-impl glium::uniforms::AsUniformValue for math::M3<f32> {
-    fn as_uniform_value(&self) -> glium::uniforms::UniformValue {
-        glium::uniforms::UniformValue::Mat3([
-            [self.c0.x, self.c0.y, self.c0.z],
-            [self.c1.x, self.c1.y, self.c1.z],
-            [self.c2.x, self.c2.y, self.c2.z],
-        ])
-    }
-}
-
-impl glium::uniforms::AsUniformValue for math::M4<f32> {
-    fn as_uniform_value(&self) -> glium::uniforms::UniformValue {
-        glium::uniforms::UniformValue::Mat4([
-            [self.c0.x, self.c0.y, self.c0.z, self.c0.w],
-            [self.c1.x, self.c1.y, self.c1.z, self.c1.w],
-            [self.c2.x, self.c2.y, self.c2.z, self.c2.w],
-            [self.c3.x, self.c3.y, self.c3.z, self.c3.w],
-        ])
-    }
+#[derive(Clone, Copy, Debug)]
+pub struct TextVertex {
+    pub position: math::V2<f32>,
+    pub uv: math::V2<f32>,
+    pub color: math::V4<f32>,
 }
 
 pub struct InputState {
-    event_proxy: EventLoopProxy<UserEvent>,
+    event_sender: EventSender,
+    event_receiver: EventReceiver,
     closed: bool,
     text: String,
     pressed_keys: HashSet<winit::event::VirtualKeyCode>,
@@ -649,9 +428,10 @@ pub struct InputState {
 }
 
 impl InputState {
-    pub fn new(event_proxy: EventLoopProxy<UserEvent>) -> InputState {
+    pub fn new(event_sender: EventSender, event_receiver: EventReceiver) -> InputState {
         InputState {
-            event_proxy,
+            event_sender,
+            event_receiver,
             closed: false,
             text: String::new(),
             pressed_keys: HashSet::new(),
@@ -668,11 +448,7 @@ impl InputState {
     }
 
     pub fn send_user_event(&self, event: UserEvent) {
-        let event_err = self.event_proxy.send_event(event);
-        match event_err {
-            Err(error) => log::error!("error sending user event: {:?}", error),
-            _ => (),
-        }
+        self.event_sender.send_user_event(event);
     }
 
     pub fn reset(&mut self) {
@@ -805,5 +581,41 @@ impl InputState {
 
 trait Widget {
     fn update(&mut self, dt: Duration, input_state: &InputState, world: &World);
-    fn draw<S: glium::Surface>(&mut self, graphics_state: &GraphicsState, frame: &mut S);
+    fn draw(&mut self, frame: &mut Frame);
+}
+
+pub trait UserEventSender: Clone {
+    fn send_user_event(&self, event: UserEvent);
+}
+
+pub trait UserEventReceiver {
+    type Iter: Iterator<Item = UserEvent>;
+    fn user_event_iter(&self) -> Self::Iter;
+}
+
+impl UserEventSender for std::sync::mpsc::Sender<UserEvent> {
+    fn send_user_event(&self, event: UserEvent) {
+        let _ = self.send(event);
+    }
+}
+
+impl UserEventSender for EventLoopProxy<UserEvent> {
+    fn send_user_event(&self, event: UserEvent) {
+        let _ = self.send_event(event);
+    }
+}
+
+impl UserEventReceiver for std::sync::mpsc::Receiver<UserEvent> {
+    type Iter = std::vec::IntoIter<UserEvent>;
+    fn user_event_iter(&self) -> Self::Iter {
+        let items: Vec<UserEvent> = self.try_iter().collect();
+        items.into_iter()
+    }
+}
+
+impl UserEventReceiver for () {
+    type Iter = std::iter::Empty<UserEvent>;
+    fn user_event_iter(&self) -> Self::Iter {
+        std::iter::empty()
+    }
 }

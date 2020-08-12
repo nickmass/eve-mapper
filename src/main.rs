@@ -5,7 +5,7 @@ mod font;
 mod gfx;
 mod math;
 mod oauth;
-mod shaders;
+mod platform;
 mod world;
 
 fn main() {
