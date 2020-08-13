@@ -1,14 +1,15 @@
-use crate::math;
+use std::rc::Rc;
 
 use super::{
     font, images, DataEvent, GraphicsContext, InputState, MapEvent, RouteEvent, UserEvent, Widget,
 };
+use crate::math;
 use crate::platform::Frame;
 
 use font::TextAnchor;
 
-pub struct InfoBox<'a> {
-    context: &'a GraphicsContext,
+pub struct InfoBox {
+    context: Rc<GraphicsContext>,
     window_size: math::V2<f32>,
     map_system: Option<i32>,
     route_system: Option<i32>,
@@ -18,8 +19,8 @@ pub struct InfoBox<'a> {
     dirty: bool,
 }
 
-impl<'a> InfoBox<'a> {
-    pub fn new(context: &'a GraphicsContext) -> Self {
+impl InfoBox {
+    pub fn new(context: Rc<GraphicsContext>) -> Self {
         InfoBox {
             context,
             window_size: math::v2(1024.0, 1024.0),
@@ -33,7 +34,7 @@ impl<'a> InfoBox<'a> {
     }
 }
 
-impl<'a> Widget for InfoBox<'a> {
+impl Widget for InfoBox {
     fn update(
         &mut self,
         _dt: std::time::Duration,

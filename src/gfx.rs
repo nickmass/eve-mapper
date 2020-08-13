@@ -4,6 +4,7 @@ use winit::window::WindowBuilder;
 
 use std::cell::Cell;
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::font;
@@ -64,7 +65,7 @@ pub enum QueryEvent {
 pub struct Window {
     event_loop: EventLoop<UserEvent>,
     user_state: UserState,
-    graphics_context: GraphicsContext,
+    graphics_context: Rc<GraphicsContext>,
 }
 
 struct UserState {
@@ -110,15 +111,13 @@ impl Window {
         let display = GraphicsBackend::new(w_builder, &event_loop, width, height);
 
         let mut font_cache = font::FontCache::new(&display, 1024, 1024);
-        let ui_font = font_cache.load("evesans", font::EVE_SANS_NEUE).unwrap();
-        let title_font = font_cache
-            .load("evesans-bold", font::EVE_SANS_NEUE_BOLD)
-            .unwrap();
-        let symbol_font = font_cache.load("nanumgothic", font::NANUMGOTHIC).unwrap();
+        let ui_font = font_cache.load::<font::EveSansNeue>().unwrap();
+        let title_font = font_cache.load::<font::EveSansNeueBold>().unwrap();
+        let symbol_font = font_cache.load::<font::NanumGothic>().unwrap();
 
         let images = images::Images::new(&display, 4096, 4096);
 
-        let graphics_context = GraphicsContext {
+        let graphics_context = Rc::new(GraphicsContext {
             display,
             ui_font,
             title_font,
@@ -126,9 +125,9 @@ impl Window {
             font_cache,
             images,
             ui_scale: Cell::new(1.0),
-        };
+        });
 
-        graphics_context.set_ui_scale(math::V2::new(width, height).as_f32());
+        graphics_context.set_ui_scale(math::v2(width, height).as_f32());
 
         let user_state = UserState {
             query_string: String::new(),
@@ -154,19 +153,15 @@ impl Window {
             }
         });
 
-        let mut user_state = self.user_state;
-        let graphics_context = unsafe {
-            std::mem::transmute::<&GraphicsContext, &'static GraphicsContext>(
-                &self.graphics_context,
-            )
-        };
-
         let mut input_state = InputState::new(event_sender, event_receiver);
-        let mut map = Map::new(&graphics_context);
-        let mut info_box = InfoBox::new(&graphics_context);
-        let mut route_box = RouteBox::new(&graphics_context);
+        let mut user_state = self.user_state;
+
+        let graphics_context = self.graphics_context.clone();
+        let mut map = Map::new(graphics_context.clone());
+        let mut info_box = InfoBox::new(graphics_context.clone());
+        let mut route_box = RouteBox::new(graphics_context.clone());
+
         let mut frame_time = Instant::now();
-        let mut render_time = Instant::now();
 
         input_state.window_size = math::v2(
             graphics_context.window_size().x as u32,
@@ -201,7 +196,7 @@ impl Window {
                         dt,
                         &input_state,
                         &mut world,
-                        graphics_context,
+                        &graphics_context,
                         &mut user_state,
                     );
                     info_box.update(dt, &input_state, &world);
@@ -226,13 +221,9 @@ impl Window {
                     map.draw(&mut frame);
                     route_box.draw(&mut frame);
                     info_box.draw(&mut frame);
-                    Window::draw(&mut frame, &graphics_context, &mut user_state, &input_state);
+                    Window::draw(&mut frame, &graphics_context, &user_state, &input_state);
 
                     graphics_context.display.end(frame);
-
-                    if render_time.elapsed().as_millis() > 1000 {
-                        render_time = Instant::now();
-                    }
 
                     //Send this event to ensure we run the updates for the next frame to continue any animations that may be ongoing
                     input_state.send_user_event(UserEvent::FrameDrawn);
@@ -309,7 +300,7 @@ impl Window {
     fn draw(
         frame: &mut Frame,
         graphics_context: &GraphicsContext,
-        user_state: &mut UserState,
+        user_state: &UserState,
         input_state: &InputState,
     ) {
         let window_size = input_state.window_size.as_f32();

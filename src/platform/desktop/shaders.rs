@@ -124,7 +124,7 @@ impl ShaderCollection {
     pub fn load_if_newer<S: ShaderProgram>(
         &mut self,
         display: &glium::Display,
-        shader: &mut Option<Shader>,
+        shader: &mut Option<Shader<S>>,
     ) {
         let vertex_path = S::vertex_path(&self.shader_dir);
         let fragment_path = S::fragment_path(&self.shader_dir);
@@ -148,6 +148,7 @@ impl ShaderCollection {
                         *shader = Shader {
                             version: current_version,
                             program,
+                            shader_type: Default::default(),
                         }
                     }
                     Err(error) => {
@@ -179,6 +180,7 @@ impl ShaderCollection {
                     *shader = Some(Shader {
                         version: current_version,
                         program,
+                        shader_type: Default::default(),
                     })
                 }
                 Err(error) => log::error!(
@@ -196,12 +198,13 @@ impl ShaderCollection {
     }
 }
 
-pub struct Shader {
+pub struct Shader<S: ShaderProgram> {
     version: usize,
     program: glium::Program,
+    shader_type: std::marker::PhantomData<S>,
 }
 
-impl std::ops::Deref for Shader {
+impl<S: ShaderProgram> std::ops::Deref for Shader<S> {
     type Target = glium::Program;
     fn deref(&self) -> &Self::Target {
         &self.program

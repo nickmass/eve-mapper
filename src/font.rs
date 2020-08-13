@@ -5,9 +5,24 @@ use crate::gfx::TextVertex;
 use crate::math;
 use crate::platform::{GraphicsBackend, RgbTexture, U8};
 
-pub const EVE_SANS_NEUE: &[u8] = include_bytes!("../fonts/evesansneue-regular.otf");
-pub const EVE_SANS_NEUE_BOLD: &[u8] = include_bytes!("../fonts/evesansneue-bold.otf");
-pub const NANUMGOTHIC: &[u8] = include_bytes!("../fonts/nanumgothic.ttf");
+pub trait FontData: std::any::Any {
+    const DATA: &'static [u8];
+}
+
+pub struct EveSansNeue;
+impl FontData for EveSansNeue {
+    const DATA: &'static [u8] = include_bytes!("../fonts/evesansneue-regular.otf");
+}
+
+pub struct EveSansNeueBold;
+impl FontData for EveSansNeueBold {
+    const DATA: &'static [u8] = include_bytes!("../fonts/evesansneue-bold.otf");
+}
+
+pub struct NanumGothic;
+impl FontData for NanumGothic {
+    const DATA: &'static [u8] = include_bytes!("../fonts/nanumgothic.ttf");
+}
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct FontId(pub usize);
@@ -22,7 +37,7 @@ pub struct FontCache {
     cache: RefCell<rusttype::gpu_cache::Cache<'static>>,
     cache_texture: RgbTexture<U8>,
     fonts: Vec<rusttype::Font<'static>>,
-    font_ids: HashMap<&'static str, FontId>,
+    font_ids: HashMap<std::any::TypeId, FontId>,
 }
 
 impl FontCache {
@@ -43,14 +58,15 @@ impl FontCache {
         }
     }
 
-    pub fn load(&mut self, name: &'static str, bytes: &'static [u8]) -> Option<FontId> {
-        if let Some(&font_id) = self.font_ids.get(name) {
+    pub fn load<F: FontData>(&mut self) -> Option<FontId> {
+        let type_id = std::any::TypeId::of::<F>();
+        if let Some(&font_id) = self.font_ids.get(&type_id) {
             Some(font_id)
         } else {
-            let font = rusttype::Font::try_from_bytes(bytes)?;
+            let font = rusttype::Font::try_from_bytes(F::DATA)?;
             let font_id = self.fonts.len();
             self.fonts.push(font);
-            self.font_ids.insert(name, FontId(font_id));
+            self.font_ids.insert(type_id, FontId(font_id));
 
             Some(FontId(font_id))
         }

@@ -12,6 +12,7 @@ use crate::gfx::{CircleVertex, LineVertex, QuadVertex, SystemData, TextVertex, U
 use crate::math;
 
 mod shaders;
+use shaders::*;
 
 pub use async_std::task::spawn;
 
@@ -42,14 +43,12 @@ pub struct GraphicsBackend {
     display: Display,
     window_size: Cell<math::V2<f32>>,
     text_buffer: RefCell<Vec<TextVertex>>,
-    system_program: RefCell<Option<shaders::Shader>>,
-    jump_program: RefCell<Option<shaders::Shader>>,
-    text_program: RefCell<Option<shaders::Shader>>,
-    quad_program: RefCell<Option<shaders::Shader>>,
-    text_draw_params: glium::DrawParameters<'static>,
-    quad_draw_params: glium::DrawParameters<'static>,
-    system_draw_params: glium::DrawParameters<'static>,
-    jump_draw_params: glium::DrawParameters<'static>,
+    system_program: RefCell<Option<Shader<SystemsShader>>>,
+    jump_program: RefCell<Option<Shader<JumpsShader>>>,
+    text_program: RefCell<Option<Shader<TextShader>>>,
+    quad_program: RefCell<Option<Shader<QuadShader>>>,
+    blend_draw_params: glium::DrawParameters<'static>,
+    depth_blend_draw_params: glium::DrawParameters<'static>,
     shader_collection: RefCell<shaders::ShaderCollection>,
 }
 
@@ -77,63 +76,25 @@ impl GraphicsBackend {
         let text_program = RefCell::new(None);
         let quad_program = RefCell::new(None);
 
-        let text_draw_params = glium::DrawParameters {
-            blend: glium::Blend {
-                color: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::SourceAlpha,
-                    destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
-                },
-                alpha: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::Zero,
-                    destination: glium::LinearBlendingFactor::One,
-                },
-                constant_value: (1.0, 1.0, 1.0, 1.0),
+        let blend = glium::Blend {
+            color: glium::BlendingFunction::Addition {
+                source: glium::LinearBlendingFactor::SourceAlpha,
+                destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
             },
+            alpha: glium::BlendingFunction::Addition {
+                source: glium::LinearBlendingFactor::Zero,
+                destination: glium::LinearBlendingFactor::One,
+            },
+            constant_value: (1.0, 1.0, 1.0, 1.0),
+        };
+
+        let blend_draw_params = glium::DrawParameters {
+            blend,
             ..Default::default()
         };
 
-        let quad_draw_params = glium::DrawParameters {
-            blend: glium::Blend {
-                color: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::SourceAlpha,
-                    destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
-                },
-                alpha: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::Zero,
-                    destination: glium::LinearBlendingFactor::One,
-                },
-                constant_value: (1.0, 1.0, 1.0, 1.0),
-            },
-            ..Default::default()
-        };
-
-        let system_draw_params = glium::DrawParameters {
-            blend: glium::Blend {
-                color: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::SourceAlpha,
-                    destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
-                },
-                alpha: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::Zero,
-                    destination: glium::LinearBlendingFactor::One,
-                },
-                constant_value: (1.0, 1.0, 1.0, 1.0),
-            },
-            ..Default::default()
-        };
-
-        let jump_draw_params = glium::DrawParameters {
-            blend: glium::Blend {
-                color: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::SourceAlpha,
-                    destination: glium::LinearBlendingFactor::OneMinusSourceAlpha,
-                },
-                alpha: glium::BlendingFunction::Addition {
-                    source: glium::LinearBlendingFactor::Zero,
-                    destination: glium::LinearBlendingFactor::One,
-                },
-                constant_value: (1.0, 1.0, 1.0, 1.0),
-            },
+        let depth_blend_draw_params = glium::DrawParameters {
+            blend,
             depth: glium::Depth {
                 test: glium::DepthTest::IfMoreOrEqual,
                 write: true,
@@ -150,10 +111,8 @@ impl GraphicsBackend {
             quad_program,
             system_program,
             jump_program,
-            text_draw_params,
-            quad_draw_params,
-            system_draw_params,
-            jump_draw_params,
+            blend_draw_params,
+            depth_blend_draw_params,
             shader_collection: RefCell::new(shader_collection),
         }
     }
@@ -187,22 +146,10 @@ impl GraphicsBackend {
 
     pub fn begin(&self) -> Frame {
         let mut shader_collection = self.shader_collection.borrow_mut();
-        shader_collection.load_if_newer::<shaders::SystemsShader>(
-            &self.display,
-            &mut self.system_program.borrow_mut(),
-        );
-        shader_collection.load_if_newer::<shaders::JumpsShader>(
-            &self.display,
-            &mut self.jump_program.borrow_mut(),
-        );
-        shader_collection.load_if_newer::<shaders::TextShader>(
-            &self.display,
-            &mut self.text_program.borrow_mut(),
-        );
-        shader_collection.load_if_newer::<shaders::QuadShader>(
-            &self.display,
-            &mut self.quad_program.borrow_mut(),
-        );
+        shader_collection.load_if_newer(&self.display, &mut self.system_program.borrow_mut());
+        shader_collection.load_if_newer(&self.display, &mut self.jump_program.borrow_mut());
+        shader_collection.load_if_newer(&self.display, &mut self.text_program.borrow_mut());
+        shader_collection.load_if_newer(&self.display, &mut self.quad_program.borrow_mut());
 
         Frame {
             frame: self.display.draw(),
@@ -239,7 +186,7 @@ impl GraphicsBackend {
             &glium::index::NoIndices(glium::index::PrimitiveType::TriangleFan),
             &self.system_program.borrow().as_ref().unwrap(),
             &uniforms,
-            &self.system_draw_params,
+            &self.blend_draw_params,
         );
 
         if let Err(error) = draw_res {
@@ -266,7 +213,7 @@ impl GraphicsBackend {
             &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
             &self.jump_program.borrow().as_ref().unwrap(),
             &uniforms,
-            &self.jump_draw_params,
+            &self.depth_blend_draw_params,
         );
 
         if let Err(error) = draw_res {
@@ -304,7 +251,7 @@ impl GraphicsBackend {
             &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
             &self.text_program.borrow().as_ref().unwrap(),
             &uniforms,
-            &self.text_draw_params,
+            &self.blend_draw_params,
         );
 
         if let Err(error) = draw_res {
@@ -340,7 +287,7 @@ impl GraphicsBackend {
             &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
             &self.quad_program.borrow().as_ref().unwrap(),
             &uniforms,
-            &self.quad_draw_params,
+            &self.blend_draw_params,
         );
 
         if let Err(error) = draw_res {
@@ -381,7 +328,7 @@ impl GraphicsBackend {
             &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
             &self.quad_program.borrow().as_ref().unwrap(),
             &uniforms,
-            &self.quad_draw_params,
+            &self.blend_draw_params,
         );
 
         if let Err(error) = draw_res {

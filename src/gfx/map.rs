@@ -8,6 +8,7 @@ use super::{
 };
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::Duration;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -31,8 +32,8 @@ struct MapJump {
     on_route: bool,
 }
 
-pub struct Map<'a> {
-    context: &'a GraphicsContext,
+pub struct Map {
+    context: Rc<GraphicsContext>,
     map_systems: Option<HashMap<i32, MapSystem>>,
     map_jumps: Option<Vec<MapJump>>,
     system_vertexes: Option<Vec<SystemData>>,
@@ -58,8 +59,8 @@ pub struct Map<'a> {
     circle_buffer: Buffer<CircleVertex>,
 }
 
-impl<'a> Map<'a> {
-    pub fn new(context: &'a GraphicsContext) -> Self {
+impl Map {
+    pub fn new(context: Rc<GraphicsContext>) -> Self {
         let mut circle_verts = Vec::new();
         circle_verts.push(CircleVertex {
             position: math::v2(0.0, 0.0),
@@ -103,7 +104,7 @@ impl<'a> Map<'a> {
     }
 }
 
-impl<'a> Widget for Map<'a> {
+impl Widget for Map {
     fn update(&mut self, _dt: Duration, input_state: &InputState, world: &World) {
         for event in input_state.user_events() {
             match event {

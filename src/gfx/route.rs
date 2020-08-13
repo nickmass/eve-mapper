@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use crate::math;
 use crate::platform::Frame;
 
@@ -7,8 +9,8 @@ use super::{
 
 use font::TextAnchor;
 
-pub struct RouteBox<'a> {
-    context: &'a GraphicsContext,
+pub struct RouteBox {
+    context: Rc<GraphicsContext>,
     window_size: math::V2<f32>,
     player_location: Option<i32>,
     text_spans: Vec<font::PositionedTextSpan>,
@@ -18,8 +20,8 @@ pub struct RouteBox<'a> {
     selected_system: Option<i32>,
 }
 
-impl<'a> RouteBox<'a> {
-    pub fn new(context: &'a GraphicsContext) -> Self {
+impl RouteBox {
+    pub fn new(context: Rc<GraphicsContext>) -> Self {
         RouteBox {
             context,
             window_size: math::v2(1024.0, 1024.0),
@@ -49,7 +51,7 @@ impl<'a> RouteBox<'a> {
     }
 }
 
-impl<'a> Widget for RouteBox<'a> {
+impl Widget for RouteBox {
     fn update(
         &mut self,
         _dt: std::time::Duration,

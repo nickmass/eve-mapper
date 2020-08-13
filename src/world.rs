@@ -12,7 +12,7 @@ use std::sync::{Arc, RwLock};
 use crate::esi;
 use crate::gfx::{DataEvent, UserEvent, UserEventSender};
 use crate::math;
-use crate::platform::{read_file, spawn, EventSender};
+use crate::platform::{file_exists, read_file, spawn, EventSender};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Edge {
@@ -982,105 +982,107 @@ impl Galaxy {
             }
         }
 
-        let bridges = read_file("bridges.tsv").await.unwrap();
-        let bridges_tsv = String::from_utf8(bridges).unwrap();
+        if file_exists("bridges.tsv") {
+            let bridges = read_file("bridges.tsv").await.unwrap();
+            let bridges_tsv = String::from_utf8(bridges).unwrap();
 
-        let mut jb_id = 0;
-        for line in bridges_tsv.lines() {
-            let line_parts: Vec<_> = line.split('\t').collect();
-            let left = line_parts[1].split(' ').next().unwrap();
-            let right = line_parts[2].split(' ').next().unwrap();
+            let mut jb_id = 0;
+            for line in bridges_tsv.lines() {
+                let line_parts: Vec<_> = line.split('\t').collect();
+                let left = line_parts[1].split(' ').next().unwrap();
+                let right = line_parts[2].split(' ').next().unwrap();
 
-            let left = galaxy
-                .systems_by_name
-                .get(left)
-                .and_then(|id| galaxy.systems.get(id))
-                .cloned()
-                .unwrap();
-            let right = galaxy
-                .systems_by_name
-                .get(right)
-                .and_then(|id| galaxy.systems.get(id))
-                .cloned()
-                .unwrap();
+                let left = galaxy
+                    .systems_by_name
+                    .get(left)
+                    .and_then(|id| galaxy.systems.get(id))
+                    .cloned()
+                    .unwrap();
+                let right = galaxy
+                    .systems_by_name
+                    .get(right)
+                    .and_then(|id| galaxy.systems.get(id))
+                    .cloned()
+                    .unwrap();
 
-            let left_jb_id = jb_id;
-            let right_jb_id = jb_id + 1;
-            jb_id += 2;
-            let left_jb = esi::GetUniverseStargate {
-                stargate_id: left_jb_id,
-                name: format!("Jump Gate ({} --> {})", left.name, right.name),
-                destination: esi::GetUniverseStargateDestination {
-                    stargate_id: right_jb_id,
-                    system_id: right.system_id,
-                },
-                position: esi::Position {
-                    x: left.position.x,
-                    y: left.position.y,
-                    z: left.position.z,
-                },
-                system_id: left.system_id,
-            };
-
-            let right_jb = esi::GetUniverseStargate {
-                stargate_id: right_jb_id,
-                name: format!("Jump Gate ({} --> {})", right.name, left.name),
-                destination: esi::GetUniverseStargateDestination {
+                let left_jb_id = jb_id;
+                let right_jb_id = jb_id + 1;
+                jb_id += 2;
+                let left_jb = esi::GetUniverseStargate {
                     stargate_id: left_jb_id,
+                    name: format!("{} » {}", left.name, right.name),
+                    destination: esi::GetUniverseStargateDestination {
+                        stargate_id: right_jb_id,
+                        system_id: right.system_id,
+                    },
+                    position: esi::Position {
+                        x: left.position.x,
+                        y: left.position.y,
+                        z: left.position.z,
+                    },
                     system_id: left.system_id,
-                },
-                position: esi::Position {
-                    x: right.position.x,
-                    y: right.position.y,
-                    z: right.position.z,
-                },
-                system_id: right.system_id,
-            };
+                };
 
-            galaxy.stargates.insert(left_jb_id, left_jb);
-            let left_node = Node::JumpGate {
-                stargate: left_jb_id,
-                source: left.system_id,
-                destination: right.system_id,
-            };
-            let left_node_id = galaxy.graph.add_node(left_node);
-            all_stargates.insert(left_jb_id, left_node_id);
-            let left_system_node = all_systems.get(&left.system_id).unwrap();
+                let right_jb = esi::GetUniverseStargate {
+                    stargate_id: right_jb_id,
+                    name: format!("{} » {}", right.name, left.name),
+                    destination: esi::GetUniverseStargateDestination {
+                        stargate_id: left_jb_id,
+                        system_id: left.system_id,
+                    },
+                    position: esi::Position {
+                        x: right.position.x,
+                        y: right.position.y,
+                        z: right.position.z,
+                    },
+                    system_id: right.system_id,
+                };
 
-            galaxy.stargates.insert(right_jb_id, right_jb);
-            let right_node = Node::JumpGate {
-                stargate: right_jb_id,
-                source: right.system_id,
-                destination: left.system_id,
-            };
-            let right_node_id = galaxy.graph.add_node(right_node);
-            all_stargates.insert(right_jb_id, right_node_id);
-            let right_system_node = all_systems.get(&right.system_id).unwrap();
+                galaxy.stargates.insert(left_jb_id, left_jb);
+                let left_node = Node::JumpGate {
+                    stargate: left_jb_id,
+                    source: left.system_id,
+                    destination: right.system_id,
+                };
+                let left_node_id = galaxy.graph.add_node(left_node);
+                all_stargates.insert(left_jb_id, left_node_id);
+                let left_system_node = all_systems.get(&left.system_id).unwrap();
 
-            let left_warp = Edge::Warp {
-                system: left.system_id,
-                distance: 1.0,
-            };
+                galaxy.stargates.insert(right_jb_id, right_jb);
+                let right_node = Node::JumpGate {
+                    stargate: right_jb_id,
+                    source: right.system_id,
+                    destination: left.system_id,
+                };
+                let right_node_id = galaxy.graph.add_node(right_node);
+                all_stargates.insert(right_jb_id, right_node_id);
+                let right_system_node = all_systems.get(&right.system_id).unwrap();
 
-            let right_warp = Edge::Warp {
-                system: right.system_id,
-                distance: 1.0,
-            };
+                let left_warp = Edge::Warp {
+                    system: left.system_id,
+                    distance: 1.0,
+                };
 
-            let edge = Edge::JumpBridge {
-                left: left.system_id,
-                right: right.system_id,
-            };
+                let right_warp = Edge::Warp {
+                    system: right.system_id,
+                    distance: 1.0,
+                };
 
-            galaxy
-                .graph
-                .add_edge(left_node_id.clone(), left_system_node.clone(), left_warp);
-            galaxy
-                .graph
-                .add_edge(right_node_id.clone(), right_system_node.clone(), right_warp);
-            galaxy
-                .graph
-                .add_edge(left_node_id.clone(), right_node_id.clone(), edge);
+                let edge = Edge::JumpBridge {
+                    left: left.system_id,
+                    right: right.system_id,
+                };
+
+                galaxy
+                    .graph
+                    .add_edge(left_node_id.clone(), left_system_node.clone(), left_warp);
+                galaxy
+                    .graph
+                    .add_edge(right_node_id.clone(), right_system_node.clone(), right_warp);
+                galaxy
+                    .graph
+                    .add_edge(left_node_id.clone(), right_node_id.clone(), edge);
+            }
         }
 
         log::info!("galaxy loaded");
