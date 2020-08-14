@@ -4,7 +4,7 @@ use crate::world::{JumpType, World};
 
 use super::{
     font, CircleVertex, DataEvent, GraphicsContext, InputState, LineVertex, MapEvent, MouseButton,
-    QueryEvent, SystemData, UserEvent, Widget,
+    QueryEvent, SystemData, UserEvent, VirtualKeyCode, Widget,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -185,12 +185,8 @@ impl Widget for Map {
 
         let mut show_distance = false;
         if let Some(system_id) = self.selected_system.or(self.player_location) {
-            if input_state
-                .pressed_keys
-                .contains(&super::VirtualKeyCode::LAlt)
-                || input_state
-                    .pressed_keys
-                    .contains(&super::VirtualKeyCode::RAlt)
+            if input_state.is_key_down(VirtualKeyCode::LAlt)
+                || input_state.is_key_down(VirtualKeyCode::RAlt)
             {
                 if Some(system_id) != self.distance_map.as_ref().map(|(s, _d)| *s) {
                     self.distance_map = Some((system_id, world.distances_from(system_id)));
@@ -201,12 +197,8 @@ impl Widget for Map {
             }
         }
 
-        if input_state
-            .released_keys
-            .contains(&super::VirtualKeyCode::LAlt)
-            || input_state
-                .released_keys
-                .contains(&super::VirtualKeyCode::RAlt)
+        if input_state.was_key_down(VirtualKeyCode::LAlt)
+            || input_state.was_key_down(VirtualKeyCode::RAlt)
         {
             text_dirty = true;
             self.system_vertexes = None;
@@ -249,7 +241,7 @@ impl Widget for Map {
                 let mut closest_match: Option<(f32, i32)> = None;
                 for system in systems.values() {
                     let position = (text_transform * system.position.expand(1.0)).collapse();
-                    let distance = position.distance(&input_state.mouse_position);
+                    let distance = position.distance(&input_state.mouse_position());
 
                     if closest_match.map(|c| distance < c.0).unwrap_or(true) {
                         closest_match = Some((distance, system.system_id));

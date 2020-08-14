@@ -9,7 +9,7 @@ use std::sync::Arc;
 use crate::cache::{Cache, CacheError, CacheKind};
 use crate::oauth::{self, Profile};
 use crate::platform::time::{Instant, SystemTime};
-use crate::platform::{parse_http_date, spawn, ESI_IMAGE_SERVER};
+use crate::platform::{parse_http_date, spawn, ESI_IMAGE_SERVER, USER_AGENT};
 
 pub const ALWAYS_CACHE: bool = false;
 
@@ -200,10 +200,11 @@ impl Client {
             use sha2::Digest;
             let path_hash = format!("{:x}", sha2::Sha256::digest(url.as_str().as_bytes()));
 
-            let mut request = self.client.request(method.clone(), url.clone()).header(
-                header::USER_AGENT,
-                "EveMapper-Development v0.01: nickmass@nickmass.com",
-            );
+            let mut request = self.client.request(method.clone(), url.clone());
+
+            if let Some(user_agent) = USER_AGENT {
+                request = request.header(header::USER_AGENT, user_agent);
+            }
 
             if auth {
                 let auth = self.profile.read().await.token.authorization();

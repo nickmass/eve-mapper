@@ -6,7 +6,7 @@ use winit::window::WindowBuilder;
 
 use std::cell::{Cell, RefCell};
 
-use crate::font::{FontCache, PositionedTextSpan};
+use crate::gfx::font::{FontCache, PositionedTextSpan};
 use crate::gfx::images::{Image, Images};
 use crate::gfx::{CircleVertex, LineVertex, QuadVertex, SystemData, TextVertex, UserEvent};
 use crate::math;
@@ -21,6 +21,8 @@ pub use std::time;
 pub use async_std::fs::{read as read_file, write as write_file};
 
 pub const ESI_IMAGE_SERVER: &'static str = "https://images.evetech.net/";
+pub const USER_AGENT: Option<&'static str> =
+    Some("EveMapper-Development v0.01: nickmass@nickmass.com");
 
 pub fn file_exists<P: AsRef<std::path::Path>>(path: P) -> bool {
     std::path::Path::exists(path.as_ref())

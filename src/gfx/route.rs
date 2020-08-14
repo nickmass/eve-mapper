@@ -37,7 +37,7 @@ impl RouteBox {
     pub fn selected_system(&mut self, input_state: &InputState) {
         let mut system = None;
         for (system_id, bounds) in &self.node_bounds {
-            if bounds.as_f32().contains(input_state.mouse_position) {
+            if bounds.as_f32().contains(input_state.mouse_position()) {
                 system = Some(*system_id);
             }
         }

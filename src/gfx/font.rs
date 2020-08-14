@@ -11,17 +11,17 @@ pub trait FontData: std::any::Any {
 
 pub struct EveSansNeue;
 impl FontData for EveSansNeue {
-    const DATA: &'static [u8] = include_bytes!("../fonts/evesansneue-regular.otf");
+    const DATA: &'static [u8] = include_bytes!("../../fonts/evesansneue-regular.otf");
 }
 
 pub struct EveSansNeueBold;
 impl FontData for EveSansNeueBold {
-    const DATA: &'static [u8] = include_bytes!("../fonts/evesansneue-bold.otf");
+    const DATA: &'static [u8] = include_bytes!("../../fonts/evesansneue-bold.otf");
 }
 
 pub struct NanumGothic;
 impl FontData for NanumGothic {
-    const DATA: &'static [u8] = include_bytes!("../fonts/nanumgothic.ttf");
+    const DATA: &'static [u8] = include_bytes!("../../fonts/nanumgothic.ttf");
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]

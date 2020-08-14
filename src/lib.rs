@@ -1,12 +1,14 @@
 mod cache;
 mod error;
 mod esi;
-mod font;
 mod gfx;
 mod math;
 mod oauth;
 mod platform;
 mod world;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use gfx::Window;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;

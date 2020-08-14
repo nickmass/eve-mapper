@@ -5,7 +5,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::platform::web::*;
 use winit::window::WindowBuilder;
 
-use crate::font::{FontCache, PositionedTextSpan};
+use crate::gfx::font::{FontCache, PositionedTextSpan};
 use crate::gfx::images::{Image, Images};
 use crate::gfx::{CircleVertex, LineVertex, QuadVertex, SystemData, TextVertex, UserEvent};
 use crate::math;
@@ -25,6 +25,7 @@ const BRIDGES: &[u8] = include_bytes!("../../bridges.tsv");
 
 pub const ESI_IMAGE_SERVER: &'static str =
     "https://cors-anywhere.herokuapp.com/https://images.evetech.net/";
+pub const USER_AGENT: Option<&'static str> = None;
 
 pub fn file_exists<P: AsRef<std::path::Path>>(path: P) -> bool {
     match path.as_ref().file_name().and_then(|s| s.to_str()) {
@@ -139,6 +140,9 @@ impl GraphicsBackend {
         context.blend_func_separate(GL::SRC_ALPHA, GL::ONE_MINUS_SRC_ALPHA, GL::ZERO, GL::ONE);
         context.blend_color(1.0, 1.0, 1.0, 1.0);
 
+        context.depth_func(GL::GEQUAL);
+        context.depth_mask(true);
+
         GraphicsBackend {
             canvas,
             window,
@@ -154,11 +158,7 @@ impl GraphicsBackend {
     fn depth_test(&self, enable: bool) {
         if enable {
             self.context.enable(GL::DEPTH_TEST);
-            self.context.depth_func(GL::ALWAYS);
-            self.context.depth_mask(true);
         } else {
-            self.context.depth_mask(false);
-            self.context.depth_func(GL::ALWAYS);
             self.context.disable(GL::DEPTH_TEST);
         }
     }
