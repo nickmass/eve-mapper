@@ -153,6 +153,14 @@ impl FontCache {
         }
 
         let bounds = text_bounds.unwrap_or(math::Rect::new(math::V2::fill(0), math::V2::fill(0)));
+
+        for (font, glyph) in positioned_nodes
+            .iter()
+            .flat_map(|n| n.glyphs.iter().map(move |g| (n.font, g)))
+        {
+            self.cache.borrow_mut().queue_glyph(font.0, glyph.clone());
+        }
+
         PositionedTextSpan {
             nodes: positioned_nodes,
             bounds,
@@ -163,35 +171,29 @@ impl FontCache {
         }
     }
 
+    pub fn fill_glyph_cache(&self, display: &GraphicsBackend) {
+        let cache_err = self.cache.borrow_mut().cache_queued(|region, data| {
+            let region = math::Rect::new(
+                math::v2(region.min.x, region.min.y),
+                math::v2(region.max.x, region.max.y),
+            );
+
+            display.update_texture(self.texture(), region, data);
+        });
+
+        if let Err(err) = cache_err {
+            log::error!("failed to update font glyph cache: {:?}", err);
+        }
+    }
+
     pub fn draw(
         &self,
-        display: &GraphicsBackend,
         text: &PositionedTextSpan,
         buffer: &mut Vec<TextVertex>,
         window_size: math::V2<f32>,
         ui_scale: f32,
     ) {
-        for (font, glyph) in text
-            .nodes
-            .iter()
-            .flat_map(|n| n.glyphs.iter().map(move |g| (n.font, g)))
-        {
-            self.cache.borrow_mut().queue_glyph(font.0, glyph.clone());
-        }
-
         let offset = text.bounds.offset(text.anchor);
-
-        self.cache
-            .borrow_mut()
-            .cache_queued(|region, data| {
-                let region = math::Rect::new(
-                    math::v2(region.min.x, region.min.y),
-                    math::v2(region.max.x, region.max.y),
-                );
-
-                display.update_texture(self.texture(), region, data);
-            })
-            .unwrap();
 
         let shadow = text.shadow;
         for (shadow, color, font, glyph) in text

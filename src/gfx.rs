@@ -220,6 +220,10 @@ impl Window {
                     frame.clear_color(math::v4(0.0, 0.0, 0.0, 1.0));
                     frame.clear_depth(0.0);
 
+                    graphics_context
+                        .font_cache
+                        .fill_glyph_cache(&graphics_context.display);
+
                     map.draw(&mut frame);
                     route_box.draw(&mut frame);
                     info_box.draw(&mut frame);

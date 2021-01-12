@@ -99,6 +99,7 @@ impl Client {
             false,
             CacheKind::Static,
             |bytes| serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize),
+            |_, _| (),
         )
         .await
     }
@@ -114,6 +115,7 @@ impl Client {
             false,
             CacheKind::Dynamic,
             |bytes| serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize),
+            |_, _| (),
         )
         .await
     }
@@ -137,6 +139,36 @@ impl Client {
             true,
             CacheKind::Dynamic,
             |bytes| serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize),
+            |_, _| (),
+        )
+        .await
+    }
+
+    async fn get_auth_no_cache_with_headers<
+        S: AsRef<str>,
+        T: serde::de::DeserializeOwned + serde::Serialize,
+        FH: Fn(&mut T, &header::HeaderMap),
+    >(
+        &self,
+        path: S,
+        map_headers: FH,
+    ) -> Result<T, Error> {
+        {
+            let mut profile = self.profile.write().await;
+            if profile.token.expired() {
+                if let Ok(new_profile) = oauth::refresh(profile.clone()).await {
+                    *profile = new_profile;
+                }
+            }
+        }
+        self.execute(
+            Method::GET,
+            &self.endpoint,
+            path,
+            true,
+            CacheKind::Dynamic,
+            |bytes| serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize),
+            map_headers,
         )
         .await
     }
@@ -157,6 +189,7 @@ impl Client {
             true,
             CacheKind::None,
             |_| Ok(()),
+            |_, _| (),
         )
         .await
     }
@@ -170,6 +203,7 @@ impl Client {
                 true,
                 CacheKind::Image,
                 |bytes| Ok(serde_bytes::ByteBuf::from(bytes)),
+                |_, _| (),
             )
             .await;
         logo.map(serde_bytes::ByteBuf::into_vec)
@@ -178,6 +212,7 @@ impl Client {
     async fn execute<
         S: AsRef<str>,
         F: Fn(&[u8]) -> Result<T, Error>,
+        FH: Fn(&mut T, &header::HeaderMap),
         T: serde::de::DeserializeOwned + serde::Serialize,
     >(
         &self,
@@ -187,6 +222,7 @@ impl Client {
         auth: bool,
         cache_kind: CacheKind,
         map_value: F,
+        map_headers: FH,
     ) -> Result<T, Error> {
         let uuid = uuid::Uuid::new_v4();
         let mut retry_count: u32 = 0;
@@ -206,34 +242,35 @@ impl Client {
                 request = request.header(header::USER_AGENT, user_agent);
             }
 
-            if auth {
-                let auth = self.profile.read().await.token.authorization();
-                request = request.header(header::AUTHORIZATION, auth);
-            }
-
-            log::debug!("looking up url in cache: {}", &url);
-            let (etag, cached_value) =
-                match (cache_kind, self.cache.get(&path_hash, cache_kind).await) {
-                    (CacheKind::None, _) => (None, None),
-                    (_, Ok(value)) => return Ok(value),
-                    (_, Err(CacheError::Expired(_, value))) if ALWAYS_CACHE => {
-                        log::info!("returning expired data: {}", &url);
-                        return Ok(value);
-                    }
-                    (_, Err(CacheError::Expired(etag, value))) => (etag, Some(value)),
-                    (_, Err(_)) => (None, None),
-                };
-
-            if let Some(etag) = etag {
-                request = request.header(header::IF_NONE_MATCH, etag)
-            }
-
-            log::info!("request {}: {}", uuid, url);
-            let (response, request_start) = {
+            let (response, request_start, cached_value) = {
                 let _permit = self.limiter.acquire(1).await;
+
+                if auth {
+                    let auth = self.profile.read().await.token.authorization();
+                    request = request.header(header::AUTHORIZATION, auth);
+                }
+
+                log::debug!("looking up url in cache: {}", &url);
+                let (etag, cached_value) =
+                    match (cache_kind, self.cache.get(&path_hash, cache_kind).await) {
+                        (CacheKind::None, _) => (None, None),
+                        (_, Ok(value)) => return Ok(value),
+                        (_, Err(CacheError::Expired(_, value))) if ALWAYS_CACHE => {
+                            log::info!("returning expired data: {}", &url);
+                            return Ok(value);
+                        }
+                        (_, Err(CacheError::Expired(etag, value))) => (etag, Some(value)),
+                        (_, Err(_)) => (None, None),
+                    };
+
+                if let Some(etag) = etag {
+                    request = request.header(header::IF_NONE_MATCH, etag)
+                }
+
+                log::info!("request {}: {}", uuid, url);
                 let start = Instant::now();
                 let response = request.send().await.map_err(Error::CannotExecuteRequest)?;
-                (response, start)
+                (response, start, cached_value)
             };
 
             let status_code = response.status().as_u16();
@@ -291,7 +328,9 @@ impl Client {
 
                 let etag = parse_etag(&response);
 
-                let value = if let (Some(value), true) = (
+                let headers = response.headers().clone();
+
+                let mut value = if let (Some(value), true) = (
                     cached_value,
                     response.status() == reqwest::StatusCode::NOT_MODIFIED,
                 ) {
@@ -303,6 +342,8 @@ impl Client {
                         .map_err(Error::CannotRetrieveRequestBody)?;
                     map_value(&bytes)?
                 };
+
+                map_headers(&mut value, &headers);
 
                 if cache_kind != CacheKind::None {
                     if let Some(expires) = parsed_expires {
@@ -324,6 +365,7 @@ impl Client {
                         );
                     }
                 }
+
                 return Ok(value);
             }
             retry_count += 1;
@@ -421,27 +463,48 @@ impl Client {
         &self,
         alliance_id: i32,
         page: i32,
-    ) -> Result<Vec<GetAllianceContacts>, Error> {
+    ) -> Result<GetAllianceContacts, Error> {
         let url = format!("alliances/{}/contacts/?page={}", alliance_id, page);
-        self.get_auth_no_cache(&url).await
+        self.get_auth_no_cache_with_headers(&url, |contacts: &mut GetAllianceContacts, headers| {
+            let pages = headers
+                .get("x-pages")
+                .and_then(|n| n.to_str().ok())
+                .and_then(|n| n.parse().ok());
+            contacts.pages = pages.or(contacts.pages);
+        })
+        .await
     }
 
     pub async fn get_corporation_contacts(
         &self,
         corporation_id: i32,
         page: i32,
-    ) -> Result<Vec<GetCorporationContacts>, Error> {
+    ) -> Result<GetCorporationContacts, Error> {
         let url = format!("corporations/{}/contacts/?page={}", corporation_id, page);
-        self.get_auth_no_cache(&url).await
+        self.get_auth_no_cache_with_headers(
+            &url,
+            |contacts: &mut GetCorporationContacts, headers| {
+                let pages = headers
+                    .get("x-pages")
+                    .and_then(|n| n.to_str().ok())
+                    .and_then(|n| n.parse().ok());
+                contacts.pages = pages.or(contacts.pages);
+            },
+        )
+        .await
     }
 
-    pub async fn get_character_contacts(
-        &self,
-        page: i32,
-    ) -> Result<Vec<GetCharacterContacts>, Error> {
+    pub async fn get_character_contacts(&self, page: i32) -> Result<GetCharacterContacts, Error> {
         let character = self.profile.read().await.character.character_id;
         let url = format!("characters/{}/contacts/?page={}", character, page);
-        self.get_auth_no_cache(&url).await
+        self.get_auth_no_cache_with_headers(&url, |contacts: &mut GetCharacterContacts, headers| {
+            let pages = headers
+                .get("x-pages")
+                .and_then(|n| n.to_str().ok())
+                .and_then(|n| n.parse().ok());
+            contacts.pages = pages.or(contacts.pages);
+        })
+        .await
     }
 
     pub async fn get_sovereignty_map(&self) -> Result<Vec<GetSovereigntyMap>, Error> {
@@ -577,26 +640,49 @@ pub struct GetCharacterLocation {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetAllianceContact {
+    pub contact_id: i32,
+    pub contact_type: String,
+    pub standing: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(transparent)]
 pub struct GetAllianceContacts {
+    pub contacts: Vec<GetAllianceContact>,
+    #[serde(skip)]
+    pub pages: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GetCorporationContact {
     pub contact_id: i32,
     pub contact_type: String,
     pub standing: f64,
 }
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(transparent)]
 pub struct GetCorporationContacts {
-    pub contact_id: i32,
-    pub contact_type: String,
-    pub standing: f64,
+    pub contacts: Vec<GetCorporationContact>,
+    #[serde(skip)]
+    pub pages: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct GetCharacterContacts {
+pub struct GetCharacterContact {
     pub contact_id: i32,
     pub contact_type: String,
     pub is_blocked: Option<bool>,
     pub is_watched: Option<bool>,
     pub standing: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct GetCharacterContacts {
+    pub contacts: Vec<GetCharacterContact>,
+    #[serde(skip)]
+    pub pages: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

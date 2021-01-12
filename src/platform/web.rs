@@ -264,7 +264,7 @@ impl GraphicsBackend {
         let mut text_buf = Vec::new();
 
         for text in text {
-            font_cache.draw(self, text, &mut text_buf, self.window_size.get(), ui_scale);
+            font_cache.draw(text, &mut text_buf, self.window_size.get(), ui_scale);
         }
 
         let text_model = gl::GlModel::new(self.context.clone(), text_buf);

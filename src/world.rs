@@ -257,73 +257,74 @@ impl World {
             },
             |e| e.weight().distance(),
             |_e| 0.0,
-        )
-        .unwrap();
+        );
 
-        let mut route_systems = Vec::new();
-        let mut route_nodes = Vec::new();
+        if let Some(route) = route {
+            let mut route_systems = Vec::new();
+            let mut route_nodes = Vec::new();
 
-        let mut visited = HashSet::new();
-        let mut arrive_gate = None;
-        for gate in route.1 {
-            let node = self.graph[gate];
-            match node {
-                Node::JumpGate {
-                    stargate,
-                    source,
-                    destination,
-                }
-                | Node::Stargate {
-                    stargate,
-                    source,
-                    destination,
-                } => {
-                    let gate = self.stargates.get(&stargate).unwrap();
-                    visited.insert(source);
-                    if !visited.contains(&destination) {
-                        let source = self.system(source).unwrap();
-                        let dest = self.system(destination).unwrap();
-                        let source_const = self.constellation(source.constellation_id);
-                        let dest_const = self.constellation(dest.constellation_id);
-
-                        route_systems.push(source.system_id);
-                        let leave_gate = match node {
-                            Node::JumpGate { .. } => Some(JumpType::JumpGate),
-                            Node::Stargate { .. } => {
-                                if source.constellation_id == dest.constellation_id {
-                                    Some(JumpType::System)
-                                } else if source_const.map(|c| c.region_id)
-                                    == dest_const.map(|c| c.region_id)
-                                {
-                                    Some(JumpType::Constellation)
-                                } else {
-                                    Some(JumpType::Region)
-                                }
-                            }
-                            _ => None,
-                        };
-
-                        route_nodes.push(RouteNode {
-                            system_id: gate.system_id,
-                            arrive_jump: arrive_gate,
-                            leave_jump: leave_gate,
-                        });
-
-                        arrive_gate = leave_gate;
+            let mut visited = HashSet::new();
+            let mut arrive_gate = None;
+            for gate in route.1 {
+                let node = self.graph[gate];
+                match node {
+                    Node::JumpGate {
+                        stargate,
+                        source,
+                        destination,
                     }
-                }
-                Node::System { .. } => (),
-            }
-        }
-        route_nodes.push(RouteNode {
-            system_id: to,
-            arrive_jump: arrive_gate,
-            leave_jump: None,
-        });
-        route_systems.push(to);
+                    | Node::Stargate {
+                        stargate,
+                        source,
+                        destination,
+                    } => {
+                        let gate = self.stargates.get(&stargate).unwrap();
+                        visited.insert(source);
+                        if !visited.contains(&destination) {
+                            let source = self.system(source).unwrap();
+                            let dest = self.system(destination).unwrap();
+                            let source_const = self.constellation(source.constellation_id);
+                            let dest_const = self.constellation(dest.constellation_id);
 
-        self.route = route_systems;
-        self.route_nodes = route_nodes;
+                            route_systems.push(source.system_id);
+                            let leave_gate = match node {
+                                Node::JumpGate { .. } => Some(JumpType::JumpGate),
+                                Node::Stargate { .. } => {
+                                    if source.constellation_id == dest.constellation_id {
+                                        Some(JumpType::System)
+                                    } else if source_const.map(|c| c.region_id)
+                                        == dest_const.map(|c| c.region_id)
+                                    {
+                                        Some(JumpType::Constellation)
+                                    } else {
+                                        Some(JumpType::Region)
+                                    }
+                                }
+                                _ => None,
+                            };
+
+                            route_nodes.push(RouteNode {
+                                system_id: gate.system_id,
+                                arrive_jump: arrive_gate,
+                                leave_jump: leave_gate,
+                            });
+
+                            arrive_gate = leave_gate;
+                        }
+                    }
+                    Node::System { .. } => (),
+                }
+            }
+            route_nodes.push(RouteNode {
+                system_id: to,
+                arrive_jump: arrive_gate,
+                leave_jump: None,
+            });
+            route_systems.push(to);
+
+            self.route = route_systems;
+            self.route_nodes = route_nodes;
+        }
     }
 
     pub fn is_on_route(&self, system_id: i32) -> bool {
@@ -428,13 +429,11 @@ impl World {
                         .await
                         .unwrap();
 
-                    if standings.len() == 0 {
+                    if standings.contacts.len() == 0 {
                         break;
                     }
 
-                    page += 1;
-
-                    for standing in standings {
+                    for standing in standings.contacts {
                         match standing.contact_type.as_str() {
                             "corporation" => {
                                 corporation_standings
@@ -451,6 +450,14 @@ impl World {
                             _ => (),
                         }
                     }
+
+                    if let Some(total_pages) = standings.pages {
+                        if total_pages <= page {
+                            break;
+                        }
+                    }
+
+                    page += 1;
                 }
             }
         };
@@ -463,13 +470,11 @@ impl World {
                     .await
                     .unwrap();
 
-                if standings.len() == 0 {
+                if standings.contacts.len() == 0 {
                     break;
                 }
 
-                page += 1;
-
-                for standing in standings {
+                for standing in standings.contacts {
                     match standing.contact_type.as_str() {
                         "corporation" => {
                             corporation_standings
@@ -486,6 +491,13 @@ impl World {
                         _ => (),
                     }
                 }
+
+                if let Some(total_pages) = standings.pages {
+                    if total_pages <= page {
+                        break;
+                    }
+                }
+                page += 1;
             }
         };
 
@@ -494,13 +506,11 @@ impl World {
             loop {
                 let standings = client.get_character_contacts(page).await.unwrap();
 
-                if standings.len() == 0 {
+                if standings.contacts.len() == 0 {
                     break;
                 }
 
-                page += 1;
-
-                for standing in standings {
+                for standing in standings.contacts {
                     match standing.contact_type.as_str() {
                         "corporation" => {
                             corporation_standings
@@ -517,6 +527,14 @@ impl World {
                         _ => (),
                     }
                 }
+
+                if let Some(total_pages) = standings.pages {
+                    if total_pages <= page {
+                        break;
+                    }
+                }
+
+                page += 1;
             }
         };
 

@@ -242,7 +242,7 @@ impl GraphicsBackend {
         text_buf.clear();
 
         for text in text {
-            font_cache.draw(self, text, &mut text_buf, self.window_size.get(), ui_scale);
+            font_cache.draw(text, &mut text_buf, self.window_size.get(), ui_scale);
         }
 
         let text_data_buf = glium::VertexBuffer::new(&self.display, &text_buf)
