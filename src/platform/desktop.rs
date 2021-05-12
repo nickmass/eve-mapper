@@ -5,6 +5,7 @@ use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::WindowBuilder;
 
 use std::cell::{Cell, RefCell};
+use std::convert::TryInto;
 
 use crate::gfx::font::{FontCache, PositionedTextSpan};
 use crate::gfx::images::{Image, Images};
@@ -49,6 +50,8 @@ pub struct GraphicsBackend {
     jump_program: RefCell<Option<Shader<JumpsShader>>>,
     text_program: RefCell<Option<Shader<TextShader>>>,
     quad_program: RefCell<Option<Shader<QuadShader>>>,
+    quad_indices: RefCell<Vec<u32>>,
+    quad_index_buffer: RefCell<Option<glium::IndexBuffer<u32>>>,
     blend_draw_params: glium::DrawParameters<'static>,
     depth_blend_draw_params: glium::DrawParameters<'static>,
     shader_collection: RefCell<shaders::ShaderCollection>,
@@ -105,12 +108,17 @@ impl GraphicsBackend {
             ..Default::default()
         };
 
+        let quad_indices = RefCell::new(Vec::new());
+        let quad_index_buffer = RefCell::new(None);
+
         GraphicsBackend {
             display,
             window_size,
             text_buffer: RefCell::new(Vec::new()),
             text_program,
             quad_program,
+            quad_indices,
+            quad_index_buffer,
             system_program,
             jump_program,
             blend_draw_params,
@@ -165,6 +173,44 @@ impl GraphicsBackend {
         }
     }
 
+    fn fill_quad_indices(&self, num_vertexes: usize) -> usize {
+        let mut quad_indices = self.quad_indices.borrow_mut();
+        let mut quad_index_buffer = self.quad_index_buffer.borrow_mut();
+        let end = num_vertexes / 4;
+        let start = quad_indices.len() / 6;
+        let num_indices = end * 6;
+
+        if quad_index_buffer.is_some() && start >= end {
+            return num_indices;
+        }
+
+        if start < end {
+            quad_indices.reserve(end - start);
+
+            let start: u32 = start.try_into().expect("overflowed quad index buffer");
+            let end: u32 = end.try_into().expect("overflowed quad index buffer");
+
+            for n in start..end {
+                quad_indices.push(n * 4);
+                quad_indices.push(n * 4 + 1);
+                quad_indices.push(n * 4 + 2);
+                quad_indices.push(n * 4 + 1);
+                quad_indices.push(n * 4 + 2);
+                quad_indices.push(n * 4 + 3);
+            }
+        }
+
+        let buffer = glium::IndexBuffer::new(
+            &self.display,
+            glium::index::PrimitiveType::TrianglesList,
+            &quad_indices,
+        )
+        .expect("unable to create quad index buffer");
+        *quad_index_buffer = Some(buffer);
+
+        num_indices
+    }
+
     pub fn draw_system(
         &self,
         frame: &mut Frame,
@@ -174,6 +220,10 @@ impl GraphicsBackend {
         scale_matrix: math::M3<f32>,
         view_matrix: math::M3<f32>,
     ) {
+        if system_data.buffer.len() == 0 {
+            return;
+        }
+
         let uniforms = glium::uniform! {
             map_scale_matrix: scale_matrix,
             map_view_matrix: view_matrix,
@@ -204,15 +254,26 @@ impl GraphicsBackend {
         scale_matrix: math::M3<f32>,
         view_matrix: math::M3<f32>,
     ) {
+        if jump_buffer.buffer.len() == 0 {
+            return;
+        }
+
         let uniforms = glium::uniform! {
             map_scale_matrix: scale_matrix,
             map_view_matrix: view_matrix,
             zoom: zoom
         };
 
+        let end = self.fill_quad_indices(jump_buffer.buffer.len());
+
         let draw_res = frame.frame.draw(
             &jump_buffer.buffer,
-            &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
+            self.quad_index_buffer
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .slice(0..end)
+                .expect("index buffer incorrect length"),
             &self.jump_program.borrow().as_ref().unwrap(),
             &uniforms,
             &self.depth_blend_draw_params,
@@ -230,6 +291,10 @@ impl GraphicsBackend {
         text: &[PositionedTextSpan],
         ui_scale: f32,
     ) {
+        if text.len() == 0 {
+            return;
+        }
+
         let uniforms = glium::uniform! {
             window_size: self.window_size.get(),
             font_atlas: font_cache.texture().texture
@@ -242,15 +307,22 @@ impl GraphicsBackend {
         text_buf.clear();
 
         for text in text {
-            font_cache.draw(text, &mut text_buf, self.window_size.get(), ui_scale);
+            font_cache.draw(text, &mut text_buf, ui_scale);
         }
+
+        let end = self.fill_quad_indices(text_buf.len());
 
         let text_data_buf = glium::VertexBuffer::new(&self.display, &text_buf)
             .expect("unable to create font vertex buffer");
 
         let draw_res = frame.frame.draw(
             &text_data_buf,
-            &glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList),
+            self.quad_index_buffer
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .slice(0..end)
+                .expect("index buffer incorrect length"),
             &self.text_program.borrow().as_ref().unwrap(),
             &uniforms,
             &self.blend_draw_params,

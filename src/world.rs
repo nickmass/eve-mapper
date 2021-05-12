@@ -1,3 +1,4 @@
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use async_std::sync::RwLock as RwLockAsync;
 use async_std::task::sleep;
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
@@ -6,7 +7,6 @@ use futures::stream::futures_unordered::FuturesUnordered;
 use futures::stream::StreamExt;
 use petgraph::Graph;
 
-use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::esi;

@@ -11,6 +11,7 @@ use crate::gfx::{CircleVertex, LineVertex, QuadVertex, SystemData, TextVertex, U
 use crate::math;
 
 use std::cell::{Cell, RefCell};
+use std::convert::TryInto;
 use std::rc::Rc;
 
 pub use wasm_bindgen_futures::spawn_local as spawn;
@@ -93,6 +94,8 @@ pub struct GraphicsBackend {
     jumps_program: RefCell<gl::GlProgram>,
     quad_program: RefCell<gl::GlProgram>,
     text_program: RefCell<gl::GlProgram>,
+    quad_indices: RefCell<Vec<u32>>,
+    quad_index_buffer: RefCell<gl::GlIndexBuffer<u32>>,
 }
 
 impl GraphicsBackend {
@@ -143,6 +146,11 @@ impl GraphicsBackend {
         context.depth_func(GL::GEQUAL);
         context.depth_mask(true);
 
+        context.load_extension::<gl::OESElementIndexUint>();
+
+        let quad_indices = RefCell::new(Vec::new());
+        let quad_index_buffer = RefCell::new(gl::GlIndexBuffer::empty(context.clone()));
+
         GraphicsBackend {
             canvas,
             window,
@@ -152,6 +160,8 @@ impl GraphicsBackend {
             jumps_program,
             quad_program,
             text_program,
+            quad_indices,
+            quad_index_buffer,
         }
     }
 
@@ -204,6 +214,39 @@ impl GraphicsBackend {
         self.context.finish();
     }
 
+    fn fill_quad_indices(&self, num_vertexes: usize) -> usize {
+        let mut quad_indices = self.quad_indices.borrow_mut();
+        let mut quad_index_buffer = self.quad_index_buffer.borrow_mut();
+        let end = num_vertexes / 4;
+        let start = quad_indices.len() / 6;
+        let num_indices = end * 6;
+
+        if start >= end {
+            return num_indices;
+        }
+
+        if start < end {
+            quad_indices.reserve(end - start);
+
+            let start: u32 = start.try_into().expect("overflowed quad index buffer");
+            let end: u32 = end.try_into().expect("overflowed quad index buffer");
+
+            for n in start..end {
+                quad_indices.push(n * 4);
+                quad_indices.push(n * 4 + 1);
+                quad_indices.push(n * 4 + 2);
+                quad_indices.push(n * 4 + 1);
+                quad_indices.push(n * 4 + 2);
+                quad_indices.push(n * 4 + 3);
+            }
+        }
+
+        *quad_index_buffer = gl::GlIndexBuffer::empty(self.context.clone());
+        quad_index_buffer.fill(&quad_indices);
+
+        num_indices
+    }
+
     pub fn draw_system(
         &self,
         frame: &mut Frame,
@@ -242,9 +285,14 @@ impl GraphicsBackend {
             .add("u_map_view_matrix", &view_matrix)
             .add("u_zoom", &zoom);
 
-        self.jumps_program
-            .borrow_mut()
-            .draw(&jump_buffer.model, &uniforms, None);
+        let end = self.fill_quad_indices(jump_buffer.data.len());
+
+        self.jumps_program.borrow_mut().draw_indexed(
+            &jump_buffer.model,
+            &uniforms,
+            Some(&self.quad_index_buffer.borrow()),
+            Some(0..end),
+        );
     }
 
     pub fn draw_text(
@@ -264,14 +312,19 @@ impl GraphicsBackend {
         let mut text_buf = Vec::new();
 
         for text in text {
-            font_cache.draw(text, &mut text_buf, self.window_size.get(), ui_scale);
+            font_cache.draw(text, &mut text_buf, ui_scale);
         }
+
+        let end = self.fill_quad_indices(text_buf.len());
 
         let text_model = gl::GlModel::new(self.context.clone(), text_buf);
 
-        self.text_program
-            .borrow_mut()
-            .draw(&text_model, &uniforms, None);
+        self.text_program.borrow_mut().draw_indexed(
+            &text_model,
+            &uniforms,
+            Some(&self.quad_index_buffer.borrow()),
+            Some(0..end),
+        );
     }
 
     pub fn draw_image(

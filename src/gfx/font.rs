@@ -1,9 +1,12 @@
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::any::TypeId;
+use std::cell::{Cell, RefCell};
 
 use crate::gfx::TextVertex;
 use crate::math;
 use crate::platform::{GraphicsBackend, RgbTexture, U8};
+
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use fontdue::Font;
 
 pub trait FontData: std::any::Any {
     const DATA: &'static [u8];
@@ -33,234 +36,40 @@ impl From<FontId> for usize {
     }
 }
 
-pub struct FontCache {
-    cache: RefCell<rusttype::gpu_cache::Cache<'static>>,
-    cache_texture: RgbTexture<U8>,
-    fonts: Vec<rusttype::Font<'static>>,
-    font_ids: HashMap<std::any::TypeId, FontId>,
+trait TextRectExt<T> {
+    fn offset(&self, anchor: TextAnchor) -> math::V2<T>;
 }
 
-impl FontCache {
-    pub fn new(display: &GraphicsBackend, cache_width: u32, cache_height: u32) -> Self {
-        let cache_texture = display.create_texture(cache_width, cache_height);
-        let cache = rusttype::gpu_cache::Cache::builder()
-            .dimensions(cache_width, cache_height)
-            .position_tolerance(1.0)
-            .pad_glyphs(true)
-            .multithread(true)
-            .build();
+impl TextRectExt<i32> for math::Rect<i32> {
+    fn offset(&self, anchor: TextAnchor) -> math::V2<i32> {
+        let x = match anchor {
+            TextAnchor::TopLeft | TextAnchor::Left | TextAnchor::BottomLeft => 0,
+            TextAnchor::TopRight | TextAnchor::Right | TextAnchor::BottomRight => self.width(),
+            TextAnchor::Top | TextAnchor::Center | TextAnchor::Bottom => self.width() / 2,
+        };
 
-        FontCache {
-            cache: RefCell::new(cache),
-            cache_texture,
-            fonts: Vec::new(),
-            font_ids: HashMap::new(),
-        }
-    }
+        let y = match anchor {
+            TextAnchor::TopLeft | TextAnchor::Top | TextAnchor::TopRight => 0,
+            TextAnchor::BottomLeft | TextAnchor::Bottom | TextAnchor::BottomRight => self.height(),
+            TextAnchor::Left | TextAnchor::Center | TextAnchor::Right => self.height() / 2,
+        };
 
-    pub fn load<F: FontData>(&mut self) -> Option<FontId> {
-        let type_id = std::any::TypeId::of::<F>();
-        if let Some(&font_id) = self.font_ids.get(&type_id) {
-            Some(font_id)
-        } else {
-            let font = rusttype::Font::try_from_bytes(F::DATA)?;
-            let font_id = self.fonts.len();
-            self.fonts.push(font);
-            self.font_ids.insert(type_id, FontId(font_id));
-
-            Some(FontId(font_id))
-        }
-    }
-
-    pub fn get(&self, font: FontId) -> Option<rusttype::Font<'static>> {
-        self.fonts.get(font.0).cloned()
-    }
-
-    pub fn texture(&self) -> &RgbTexture<U8> {
-        &self.cache_texture
-    }
-
-    pub fn layout(
-        &self,
-        text: TextSpan,
-        anchor: TextAnchor,
-        position: math::V2<f32>,
-        shadow: bool,
-    ) -> PositionedTextSpan {
-        let scale = rusttype::Scale::uniform(text.scale);
-        let mut x_advance = position.x;
-        let mut text_bounds: Option<math::Rect<_>> = None;
-
-        let mut positioned_nodes = Vec::new();
-        let mut prev_glyph_id = None;
-        let mut prev_font = None;
-
-        for node in text.nodes {
-            if let Some(font) = self.get(node.font) {
-                if Some(node.font) != prev_font {
-                    prev_glyph_id = None;
-                    prev_font = Some(node.font);
-                }
-                let mut positioned_glyphs = Vec::new();
-
-                let v_metrics = font.v_metrics(scale);
-                let y_advance = position.y + v_metrics.ascent;
-
-                for glyph in node.text.chars().map(|c| font.glyph(c)) {
-                    if let Some(prev_glyph) = prev_glyph_id {
-                        let kerning = font.pair_kerning(scale, prev_glyph, glyph.id());
-                        x_advance += kerning;
-                    }
-                    prev_glyph_id = Some(glyph.id());
-
-                    let glyph = glyph.scaled(scale);
-                    let h_metrics = glyph.h_metrics();
-
-                    let glyph = glyph.positioned(rusttype::point(x_advance, y_advance));
-
-                    if let Some(bounds) = glyph.pixel_bounding_box() {
-                        if let Some(text_area) = text_bounds.as_mut() {
-                            if bounds.min.x < text_area.min.x {
-                                text_area.min.x = bounds.min.x;
-                            }
-                            if bounds.min.y < text_area.min.y {
-                                text_area.min.y = bounds.min.y;
-                            }
-                            if bounds.max.x > text_area.max.x {
-                                text_area.max.x = bounds.max.x;
-                            }
-                            if bounds.max.y > text_area.max.y {
-                                text_area.max.y = bounds.max.y;
-                            }
-                        } else {
-                            text_bounds = Some(math::Rect::new(
-                                math::v2(bounds.min.x, bounds.min.y),
-                                math::v2(bounds.max.x, bounds.max.y),
-                            ))
-                        }
-                    }
-
-                    x_advance += h_metrics.advance_width;
-                    positioned_glyphs.push(glyph);
-                }
-
-                positioned_nodes.push(PositionedTextNode {
-                    glyphs: positioned_glyphs,
-                    color: node.color,
-                    font: node.font,
-                });
-            }
-        }
-
-        let bounds = text_bounds.unwrap_or(math::Rect::new(math::V2::fill(0), math::V2::fill(0)));
-
-        for (font, glyph) in positioned_nodes
-            .iter()
-            .flat_map(|n| n.glyphs.iter().map(move |g| (n.font, g)))
-        {
-            self.cache.borrow_mut().queue_glyph(font.0, glyph.clone());
-        }
-
-        PositionedTextSpan {
-            nodes: positioned_nodes,
-            bounds,
-            //wrong baseline
-            baseline: position.y,
-            anchor,
-            shadow,
-        }
-    }
-
-    pub fn fill_glyph_cache(&self, display: &GraphicsBackend) {
-        let cache_err = self.cache.borrow_mut().cache_queued(|region, data| {
-            let region = math::Rect::new(
-                math::v2(region.min.x, region.min.y),
-                math::v2(region.max.x, region.max.y),
-            );
-
-            display.update_texture(self.texture(), region, data);
-        });
-
-        if let Err(err) = cache_err {
-            log::error!("failed to update font glyph cache: {:?}", err);
-        }
-    }
-
-    pub fn draw(
-        &self,
-        text: &PositionedTextSpan,
-        buffer: &mut Vec<TextVertex>,
-        window_size: math::V2<f32>,
-        ui_scale: f32,
-    ) {
-        let offset = text.bounds.offset(text.anchor);
-
-        let shadow = text.shadow;
-        for (shadow, color, font, glyph) in text
-            .nodes
-            .iter()
-            .flat_map(|n| n.glyphs.iter().map(move |g| (shadow, n.color, n.font, g)))
-        {
-            if let Ok(Some((tex_coords, screen_coords))) =
-                self.cache.borrow().rect_for(font.0, glyph)
-            {
-                let screen_coords_min =
-                    (math::v2(screen_coords.min.x, screen_coords.min.y) + offset).as_f32();
-                let screen_coords_max =
-                    (math::v2(screen_coords.max.x, screen_coords.max.y) + offset).as_f32();
-
-                let screen_coords_min = math::v2(screen_coords_min.x, screen_coords_min.y);
-                let screen_coords_max = math::v2(screen_coords_max.x, screen_coords_max.y);
-
-                let tex_coords_min = math::v2(tex_coords.min.x, tex_coords.min.y);
-                let tex_coords_max = math::v2(tex_coords.max.x, tex_coords.max.y);
-
-                let screen_rect = math::Rect::new(screen_coords_min, screen_coords_max);
-                let tex_rect = math::Rect::new(tex_coords_min, tex_coords_max);
-
-                if shadow {
-                    for (position, uv) in screen_rect
-                        .triangle_list_iter()
-                        .zip(tex_rect.triangle_list_iter())
-                    {
-                        buffer.push(TextVertex {
-                            position: math::v2(
-                                position.x + (3.0 * ui_scale),
-                                window_size.y - position.y - (3.0 * ui_scale),
-                            ),
-                            uv,
-                            color: math::V3::fill(0.01).expand(color.w),
-                        });
-                    }
-                }
-
-                for (position, uv) in screen_rect
-                    .triangle_list_iter()
-                    .zip(tex_rect.triangle_list_iter())
-                {
-                    buffer.push(TextVertex {
-                        position: math::v2(position.x, window_size.y - position.y),
-                        uv,
-                        color,
-                    });
-                }
-            }
-        }
+        math::v2(-x, -y)
     }
 }
 
-pub struct PositionedTextSpan {
-    nodes: Vec<PositionedTextNode>,
-    pub bounds: math::Rect<i32>,
-    anchor: TextAnchor,
-    shadow: bool,
-    pub baseline: f32,
-}
-
-pub struct PositionedTextNode {
-    glyphs: Vec<rusttype::PositionedGlyph<'static>>,
-    color: math::V4<f32>,
-    font: FontId,
+#[allow(dead_code)]
+#[derive(Debug, Copy, Clone)]
+pub enum TextAnchor {
+    Center,
+    Top,
+    TopLeft,
+    Left,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+    Right,
+    TopRight,
 }
 
 pub struct TextSpan<'a> {
@@ -307,37 +116,247 @@ pub struct TextNode<'a> {
     text: std::borrow::Cow<'a, str>,
 }
 
-trait TextRectExt<T> {
-    fn offset(&self, anchor: TextAnchor) -> math::V2<T>;
+pub struct PositionedTextSpan {
+    glyphs: Vec<fontdue::layout::GlyphPosition<math::V4<f32>>>,
+    pub bounds: math::Rect<i32>,
+    anchor: TextAnchor,
+    shadow: bool,
 }
 
-impl TextRectExt<i32> for math::Rect<i32> {
-    fn offset(&self, anchor: TextAnchor) -> math::V2<i32> {
-        let x = match anchor {
-            TextAnchor::TopLeft | TextAnchor::Left | TextAnchor::BottomLeft => 0,
-            TextAnchor::TopRight | TextAnchor::Right | TextAnchor::BottomRight => self.width(),
-            TextAnchor::Top | TextAnchor::Center | TextAnchor::Bottom => self.width() / 2,
-        };
+struct CacheCursor {
+    cache_width: u32,
+    cache_height: u32,
+    x: Cell<u32>,
+    y: Cell<u32>,
+    line_y: Cell<u32>,
+}
 
-        let y = match anchor {
-            TextAnchor::TopLeft | TextAnchor::Top | TextAnchor::TopRight => 0,
-            TextAnchor::BottomLeft | TextAnchor::Bottom | TextAnchor::BottomRight => self.height(),
-            TextAnchor::Left | TextAnchor::Center | TextAnchor::Right => self.height() / 2,
-        };
+impl CacheCursor {
+    fn new(cache_width: u32, cache_height: u32) -> Self {
+        CacheCursor {
+            cache_width,
+            cache_height,
+            x: Cell::new(1),
+            y: Cell::new(1),
+            line_y: Cell::new(0),
+        }
+    }
 
-        math::v2(-x, -y)
+    fn reset(&self) {
+        self.x.set(1);
+        self.y.set(1);
+        self.line_y.set(0);
+    }
+
+    fn advance(&self, metrics: fontdue::Metrics) -> Option<math::Rect<u32>> {
+        let width = metrics.width as u32;
+        let height = metrics.height as u32;
+        if self.x.get() + width + 1 > self.cache_width {
+            self.x.set(1);
+            self.y.set(self.y.get() + self.line_y.get() + 1);
+            self.line_y.set(0);
+        }
+
+        if self.y.get() + height + 1 > self.cache_height {
+            return None;
+        }
+
+        self.line_y.set(self.line_y.get().max(height));
+
+        let corner = math::v2(self.x.get(), self.y.get());
+        let dims = math::v2(width, height);
+
+        self.x.set(self.x.get() + width + 1);
+
+        Some(math::Rect::new(corner, corner + dims))
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub enum TextAnchor {
-    Center,
-    Top,
-    TopLeft,
-    Left,
-    BottomLeft,
-    Bottom,
-    BottomRight,
-    Right,
-    TopRight,
+pub struct FontCache {
+    cache_texture: RgbTexture<U8>,
+    cache_width: u32,
+    cache_height: u32,
+    fonts: Vec<Font>,
+    font_ids: HashMap<TypeId, FontId>,
+    layout: RefCell<fontdue::layout::Layout<math::V4<f32>>>,
+    frame_glyphs: RefCell<HashSet<fontdue::layout::GlyphRasterConfig>>,
+    cache_glyphs:
+        RefCell<HashMap<fontdue::layout::GlyphRasterConfig, (math::Rect<f32>, math::Rect<f32>)>>,
+    cache_cursor: CacheCursor,
+}
+
+impl FontCache {
+    pub fn new(display: &GraphicsBackend, cache_width: u32, cache_height: u32) -> Self {
+        let cache_texture = display.create_texture(cache_width, cache_height);
+        let layout = RefCell::new(fontdue::layout::Layout::new(
+            fontdue::layout::CoordinateSystem::PositiveYDown,
+        ));
+        FontCache {
+            cache_texture,
+            cache_width,
+            cache_height,
+            fonts: Vec::new(),
+            font_ids: HashMap::new(),
+            layout,
+            frame_glyphs: RefCell::new(HashSet::new()),
+            cache_glyphs: RefCell::new(HashMap::new()),
+            cache_cursor: CacheCursor::new(cache_width, cache_height),
+        }
+    }
+
+    pub fn load<F: FontData>(&mut self) -> Option<FontId> {
+        let type_id = TypeId::of::<F>();
+        if let Some(&font_id) = self.font_ids.get(&type_id) {
+            Some(font_id)
+        } else {
+            let mut font_settings = fontdue::FontSettings::default();
+            font_settings.scale = 40.0;
+            let font = Font::from_bytes(F::DATA, font_settings).ok()?;
+            let font_id = self.fonts.len();
+            self.fonts.push(font);
+            self.font_ids.insert(type_id, FontId(font_id));
+
+            Some(FontId(font_id))
+        }
+    }
+
+    pub fn texture(&self) -> &RgbTexture<U8> {
+        &self.cache_texture
+    }
+
+    pub fn layout(
+        &self,
+        text: TextSpan,
+        anchor: TextAnchor,
+        position: math::V2<f32>,
+        shadow: bool,
+    ) -> PositionedTextSpan {
+        let mut layout = self.layout.borrow_mut();
+
+        let mut settings = fontdue::layout::LayoutSettings::default();
+        settings.x = position.x;
+        settings.y = position.y;
+
+        layout.reset(&settings);
+
+        for node in text.nodes {
+            let style = fontdue::layout::TextStyle::with_user_data(
+                &node.text,
+                text.scale * 0.75,
+                node.font.0,
+                node.color,
+            );
+            layout.append(&self.fonts, &style);
+        }
+
+        let glyphs = layout.glyphs().clone();
+
+        let bounds_y = layout.height() as i32;
+        let bounds_x = glyphs
+            .iter()
+            .map(|g| (g.x + g.width as f32) as i32)
+            .max()
+            .unwrap_or(0);
+
+        let position = math::v2(position.x as i32, position.y as i32);
+        let bounds = math::Rect::new(position, math::v2(bounds_x, bounds_y + position.y));
+
+        let mut frame_glyphs = self.frame_glyphs.borrow_mut();
+        for glyph in &glyphs {
+            frame_glyphs.insert(glyph.key);
+        }
+
+        PositionedTextSpan {
+            glyphs,
+            bounds,
+            anchor,
+            shadow,
+        }
+    }
+
+    pub fn fill_glyph_cache(&self, display: &GraphicsBackend) {
+        let cache_size = math::v2(self.cache_width - 0, self.cache_height - 0).as_f32();
+
+        let mut frame_glyphs = self.frame_glyphs.borrow_mut();
+        let mut cache_glyphs = self.cache_glyphs.borrow_mut();
+
+        for glyph in frame_glyphs.drain() {
+            if cache_glyphs.contains_key(&glyph) {
+                continue;
+            }
+            if let Some(font) = self.fonts.get(glyph.font_index) {
+                let (metrics, data) = font.rasterize_indexed(glyph.glyph_index, glyph.px);
+                if let Some(region) = self.cache_cursor.advance(metrics) {
+                    display.update_texture(self.texture(), region, &data);
+
+                    let uv = math::Rect::new(
+                        region.min.as_f32() / cache_size,
+                        region.max.as_f32() / cache_size,
+                    );
+
+                    let dimensions = math::Rect::new(
+                        math::v2(0.0, 0.0),
+                        math::v2(metrics.width as f32, metrics.height as f32),
+                    );
+
+                    cache_glyphs.insert(glyph, (uv, dimensions));
+                } else {
+                    log::error!("font cache full");
+                    self.cache_cursor.reset();
+                    cache_glyphs.clear();
+                    let empty_data = vec![0; (self.cache_width * self.cache_height) as usize];
+                    let region = math::Rect::new(
+                        math::v2(0, 0),
+                        math::v2(self.cache_width, self.cache_height),
+                    );
+                    display.update_texture(self.texture(), region, &empty_data);
+                }
+            }
+        }
+    }
+
+    pub fn draw(&self, text: &PositionedTextSpan, buffer: &mut Vec<TextVertex>, ui_scale: f32) {
+        let offset = text.bounds.offset(text.anchor);
+        let shadow = text.shadow;
+
+        for glyph in text.glyphs.iter() {
+            if let Some((tex_coords, dimensions)) = self.cache_glyphs.borrow().get(&glyph.key) {
+                let corner = math::v2(glyph.x, glyph.y) + offset.as_f32();
+                let screen_coords = math::Rect::new(corner, corner + dimensions.max);
+
+                let color = glyph.user_data;
+
+                if shadow {
+                    let positions = screen_coords.corners();
+                    let uvs = tex_coords.corners();
+                    let color = math::V3::fill(0.01).expand(color.w);
+
+                    for i in 0..4 {
+                        let position = positions[i];
+                        let uv = uvs[i];
+
+                        buffer.push(TextVertex {
+                            position: position + (3.0 * ui_scale),
+                            uv,
+                            color,
+                        });
+                    }
+                }
+
+                let positions = screen_coords.corners();
+                let uvs = tex_coords.corners();
+
+                for i in 0..4 {
+                    let position = positions[i];
+                    let uv = uvs[i];
+
+                    buffer.push(TextVertex {
+                        position,
+                        uv,
+                        color,
+                    });
+                }
+            }
+        }
+    }
 }

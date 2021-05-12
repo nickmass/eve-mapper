@@ -7,9 +7,10 @@ use super::{
     QueryEvent, SystemData, UserEvent, VirtualKeyCode, Widget,
 };
 
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
+
+use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum RegionNamesLayer {
@@ -161,7 +162,7 @@ impl Widget for Map {
         }
 
         let zoom_diff = (self.current_zoom - self.target_zoom).abs() / 10.0;
-        if zoom_diff > f32::EPSILON * self.current_zoom {
+        if zoom_diff > 0.0001 {
             if self.target_zoom > self.current_zoom {
                 self.current_zoom += zoom_diff.min(self.current_zoom / 20.0);
             } else if self.target_zoom < self.current_zoom {
@@ -241,7 +242,7 @@ impl Widget for Map {
                 let mut closest_match: Option<(f32, i32)> = None;
                 for system in systems.values() {
                     let position = (text_transform * system.position.expand(1.0)).collapse();
-                    let distance = position.distance(&input_state.mouse_position());
+                    let distance = position.distance_squared(&input_state.mouse_position());
 
                     if closest_match.map(|c| distance < c.0).unwrap_or(true) {
                         closest_match = Some((distance, system.system_id));
@@ -250,7 +251,7 @@ impl Widget for Map {
 
                 if let Some((distance, system_id)) = closest_match {
                     let clamp_zoom = (self.current_zoom / 25.0).max(1.0).min(25.0) * 8.0;
-                    if distance < clamp_zoom {
+                    if distance < clamp_zoom.powi(2) {
                         selected_system = Some(system_id);
                     }
                 }
@@ -383,6 +384,17 @@ impl Widget for Map {
                         let position = positions / (count as f32);
                         let position = (text_transform * position.expand(1.0)).collapse();
 
+                        let min_corner = position - 400.0 * text_scale;
+                        let max_corner = position + 400.0 * text_scale;
+
+                        if max_corner.x < 0.0
+                            || max_corner.y < 0.0
+                            || min_corner.x > self.window_size.x
+                            || min_corner.y > self.window_size.y
+                        {
+                            continue;
+                        }
+
                         let scale = scale * text_scale;
                         let mut span = font::TextSpan::new(scale, font, color);
                         span.push(&region.name);
@@ -406,8 +418,8 @@ impl Widget for Map {
                     for system in systems.values() {
                         let pos = (text_transform * system.position.expand(1.0)).collapse();
 
-                        let min_corner = pos - 50.0;
-                        let max_corner = pos + 50.0;
+                        let min_corner = pos - 50.0 * text_scale;
+                        let max_corner = pos + 50.0 * text_scale;
 
                         if max_corner.x < 0.0
                             || max_corner.y < 0.0
@@ -524,18 +536,6 @@ impl Widget for Map {
                     jump_vertexes.push(LineVertex {
                         position: jump_right,
                         color: right_color,
-                        normal: right_norm,
-                    });
-
-                    jump_vertexes.push(LineVertex {
-                        position: jump_right,
-                        color: right_color,
-                        normal: left_norm,
-                    });
-
-                    jump_vertexes.push(LineVertex {
-                        position: jump_left,
-                        color: left_color,
                         normal: left_norm,
                     });
                 }
@@ -639,7 +639,7 @@ impl Widget for Map {
             if let Some(vertexes) = self.system_vertexes.as_ref() {
                 self.systems_vertex_buffer = Some(self.context.display.fill_buffer(vertexes));
 
-                self.context.request_redraw("map systems bugger")
+                self.context.request_redraw("map systems buffer")
             }
         }
 

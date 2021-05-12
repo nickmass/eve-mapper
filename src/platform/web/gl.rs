@@ -1,3 +1,4 @@
+use ahash::AHashMap as HashMap;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{
@@ -7,7 +8,7 @@ use web_sys::{
 
 use std::any::{Any, TypeId};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::ops::Range;
 use std::rc::Rc;
 
 pub struct GlContext<C = HtmlCanvasElement> {
@@ -73,6 +74,10 @@ impl GlExtension for OesVertexArrayObject {
 
 impl GlExtension for AngleInstancedArrays {
     const EXT_NAME: &'static str = "ANGLE_instanced_arrays";
+}
+
+impl GlExtension for OESElementIndexUint {
+    const EXT_NAME: &'static str = "OES_element_index_uint";
 }
 
 pub struct GlProgram {
@@ -151,9 +156,22 @@ impl GlProgram {
         &mut self,
         model: &GlModel<V>,
         uniforms: &GlUniformCollection,
-        indices: Option<&GlIndexBuffer>,
+        range: Option<Range<usize>>,
     ) where
         V: AsGlVertex,
+    {
+        self.draw_indexed::<_, u16>(model, uniforms, None, range)
+    }
+
+    pub fn draw_indexed<V, B>(
+        &mut self,
+        model: &GlModel<V>,
+        uniforms: &GlUniformCollection,
+        indices: Option<&GlIndexBuffer<B>>,
+        range: Option<Range<usize>>,
+    ) where
+        V: AsGlVertex,
+        B: GlIndex,
     {
         self.gl.use_program(Some(&self.program));
 
@@ -174,7 +192,7 @@ impl GlProgram {
         }
 
         self.bind_uniforms(uniforms);
-        model.draw(indices);
+        model.draw(indices, range);
 
         self.vao_ext
             .bind_vertex_array_oes(None)
@@ -469,17 +487,24 @@ impl<V: AsGlVertex> GlModel<V> {
         }
     }
 
-    fn draw(&self, indices: Option<&GlIndexBuffer>) {
+    fn draw<B: GlIndex>(&self, indices: Option<&GlIndexBuffer<B>>, range: Option<Range<usize>>) {
+        let offset = range.as_ref().map(|r| r.start as i32);
+        let count = range.as_ref().map(|r| (r.end - r.start) as i32);
+
         if let Some(indices) = indices {
             indices.bind();
             self.gl.draw_elements_with_i32(
                 self.poly_type,
-                indices.length as i32,
-                GL::UNSIGNED_SHORT,
-                0,
+                count.unwrap_or(indices.length as i32),
+                B::INDEX_TYPE,
+                offset.unwrap_or(0),
             );
         } else {
-            self.gl.draw_arrays(self.poly_type, 0, self.poly_count);
+            self.gl.draw_arrays(
+                self.poly_type,
+                offset.unwrap_or(0),
+                count.unwrap_or(self.poly_count),
+            );
         }
     }
 
@@ -513,13 +538,44 @@ impl<V: AsGlVertex> Drop for GlModel<V> {
     }
 }
 
-pub struct GlIndexBuffer {
+pub trait GlIndex: Sized {
+    const INDEX_TYPE: u32;
+
+    type Array: std::ops::Deref<Target = js_sys::Object>;
+
+    fn create_array<'a>(data: &'a [Self]) -> IndexArray<'a, Self, Self::Array>;
+}
+
+impl GlIndex for u16 {
+    const INDEX_TYPE: u32 = GL::UNSIGNED_SHORT;
+
+    type Array = js_sys::Uint16Array;
+
+    fn create_array<'a>(data: &'a [u16]) -> IndexArray<'a, Self, Self::Array> {
+        unsafe { IndexArray(data, js_sys::Uint16Array::view(data)) }
+    }
+}
+
+impl GlIndex for u32 {
+    const INDEX_TYPE: u32 = GL::UNSIGNED_INT;
+
+    type Array = js_sys::Uint32Array;
+
+    fn create_array<'a>(data: &'a [u32]) -> IndexArray<'a, Self, Self::Array> {
+        unsafe { IndexArray(data, js_sys::Uint32Array::view(data)) }
+    }
+}
+
+struct IndexArray<'a, D, T>(&'a [D], T);
+
+pub struct GlIndexBuffer<T: GlIndex> {
     gl: Rc<GlContext>,
     buffer: WebGlBuffer,
     length: usize,
+    marker: std::marker::PhantomData<T>,
 }
 
-impl GlIndexBuffer {
+impl<T: GlIndex> GlIndexBuffer<T> {
     pub fn empty(gl: Rc<GlContext>) -> Self {
         let buffer = gl.create_buffer().expect("Create Index Buffer");
 
@@ -527,6 +583,7 @@ impl GlIndexBuffer {
             gl,
             buffer,
             length: 0,
+            marker: Default::default(),
         }
     }
 
@@ -535,23 +592,21 @@ impl GlIndexBuffer {
             .bind_buffer(GL::ELEMENT_ARRAY_BUFFER, Some(&self.buffer));
     }
 
-    pub fn fill(&mut self, indices: &[u16]) {
+    pub fn fill(&mut self, indices: &[T]) {
         self.bind();
 
-        unsafe {
-            let bytes = js_sys::Uint16Array::view(indices);
-            self.gl.buffer_data_with_array_buffer_view(
-                GL::ELEMENT_ARRAY_BUFFER,
-                &bytes,
-                GL::DYNAMIC_DRAW,
-            );
-        }
+        let bytes = T::create_array(indices);
+        self.gl.buffer_data_with_array_buffer_view(
+            GL::ELEMENT_ARRAY_BUFFER,
+            &bytes.1,
+            GL::DYNAMIC_DRAW,
+        );
 
         self.length = indices.len();
     }
 }
 
-impl Drop for GlIndexBuffer {
+impl<T: GlIndex> Drop for GlIndexBuffer<T> {
     fn drop(&mut self) {
         self.gl.delete_buffer(Some(&self.buffer));
     }
@@ -908,4 +963,7 @@ extern "C" {
         vao: &WebGlVertexArrayObject,
     ) -> Result<bool, JsValue>;
 
+    #[wasm_bindgen(js_name = OESElementIndexUint)]
+    #[derive(Clone)]
+    pub type OESElementIndexUint;
 }

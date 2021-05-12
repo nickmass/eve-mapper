@@ -1,9 +1,8 @@
+use ahash::AHashSet as HashSet;
 use winit::event::{Event, MouseButton, VirtualKeyCode};
 use winit::event_loop::EventLoopProxy;
 
-use std::collections::HashSet;
-
-use super::UserEvent;
+use crate::gfx::UserEvent;
 use crate::math;
 use crate::platform::{EventReceiver, EventSender};
 

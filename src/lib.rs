@@ -2,6 +2,7 @@ mod cache;
 mod error;
 mod esi;
 mod gfx;
+mod input;
 mod math;
 mod oauth;
 mod platform;

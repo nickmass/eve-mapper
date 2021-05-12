@@ -1,7 +1,7 @@
+use ahash::AHashMap as HashMap;
 use async_std::sync::RwLock;
 use serde::{Deserialize, Serialize};
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::platform::time::{SystemTime, UNIX_EPOCH};

@@ -103,6 +103,12 @@ macro_rules! implement_vector{
                 ).sqrt()
             }
 
+            pub fn distance_squared(&self, other: &Self) -> f64 {
+                (
+                    $((self.$field - other.$field).powi(2) +)* 0.0
+                )
+            }
+
             pub fn magnitude(&self) -> f64 {
                 (
                     $(self.$field.powi(2) +)* 0.0
@@ -130,6 +136,12 @@ macro_rules! implement_vector{
                 (
                     $((self.$field - other.$field).powi(2) +)* 0.0
                 ).sqrt()
+            }
+
+            pub fn distance_squared(&self, other: &Self) -> f32 {
+                (
+                    $((self.$field - other.$field).powi(2) +)* 0.0
+                )
             }
 
             pub fn magnitude(&self) -> f32 {
@@ -507,6 +519,27 @@ impl<T: Sub<Output = T> + Num + Clone + Copy + PartialOrd> Rect<T> {
             index: 0,
         }
     }
+
+    pub fn corner_iter(&self) -> CornerIter<T> {
+        CornerIter {
+            arr: [
+                self.min,
+                V2::new(self.min.x, self.max.y),
+                V2::new(self.max.x, self.min.y),
+                self.max,
+            ],
+            index: 0,
+        }
+    }
+
+    pub fn corners(&self) -> [V2<T>; 4] {
+        [
+            self.min,
+            V2::new(self.min.x, self.max.y),
+            V2::new(self.max.x, self.min.y),
+            self.max,
+        ]
+    }
 }
 
 impl Rect<i32> {
@@ -524,6 +557,24 @@ impl<T: Copy> Iterator for TriangleListIter<T> {
     type Item = V2<T>;
     fn next(&mut self) -> Option<Self::Item> {
         if self.index >= 6 {
+            None
+        } else {
+            let ret = self.arr[self.index];
+            self.index += 1;
+            Some(ret)
+        }
+    }
+}
+
+pub struct CornerIter<T: Copy> {
+    arr: [V2<T>; 4],
+    index: usize,
+}
+
+impl<T: Copy> Iterator for CornerIter<T> {
+    type Item = V2<T>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= 4 {
             None
         } else {
             let ret = self.arr[self.index];

@@ -99,7 +99,7 @@ impl Client {
             false,
             CacheKind::Static,
             |bytes| serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize),
-            |_, _| (),
+            |d, _| d,
         )
         .await
     }
@@ -115,7 +115,7 @@ impl Client {
             false,
             CacheKind::Dynamic,
             |bytes| serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize),
-            |_, _| (),
+            |d, _| d,
         )
         .await
     }
@@ -139,20 +139,21 @@ impl Client {
             true,
             CacheKind::Dynamic,
             |bytes| serde_json::from_slice(bytes).map_err(Error::ResponseDeserialize),
-            |_, _| (),
+            |d, _| d,
         )
         .await
     }
 
     async fn get_auth_no_cache_with_headers<
         S: AsRef<str>,
-        T: serde::de::DeserializeOwned + serde::Serialize,
-        FH: Fn(&mut T, &header::HeaderMap),
+        TWeb: serde::de::DeserializeOwned + serde::Serialize,
+        TCache: serde::de::DeserializeOwned + serde::Serialize,
+        FH: Fn(TWeb, &header::HeaderMap) -> TCache,
     >(
         &self,
         path: S,
         map_headers: FH,
-    ) -> Result<T, Error> {
+    ) -> Result<TCache, Error> {
         {
             let mut profile = self.profile.write().await;
             if profile.token.expired() {
@@ -189,7 +190,7 @@ impl Client {
             true,
             CacheKind::None,
             |_| Ok(()),
-            |_, _| (),
+            |d, _| d,
         )
         .await
     }
@@ -203,7 +204,7 @@ impl Client {
                 true,
                 CacheKind::Image,
                 |bytes| Ok(serde_bytes::ByteBuf::from(bytes)),
-                |_, _| (),
+                |d, _| d,
             )
             .await;
         logo.map(serde_bytes::ByteBuf::into_vec)
@@ -211,9 +212,10 @@ impl Client {
 
     async fn execute<
         S: AsRef<str>,
-        F: Fn(&[u8]) -> Result<T, Error>,
-        FH: Fn(&mut T, &header::HeaderMap),
-        T: serde::de::DeserializeOwned + serde::Serialize,
+        F: Fn(&[u8]) -> Result<TWeb, Error>,
+        FH: Fn(TWeb, &header::HeaderMap) -> TCache,
+        TWeb: serde::de::DeserializeOwned + serde::Serialize,
+        TCache: serde::de::DeserializeOwned + serde::Serialize,
     >(
         &self,
         method: Method,
@@ -223,7 +225,7 @@ impl Client {
         cache_kind: CacheKind,
         map_value: F,
         map_headers: FH,
-    ) -> Result<T, Error> {
+    ) -> Result<TCache, Error> {
         let uuid = uuid::Uuid::new_v4();
         let mut retry_count: u32 = 0;
         while retry_count < 5 {
@@ -330,7 +332,7 @@ impl Client {
 
                 let headers = response.headers().clone();
 
-                let mut value = if let (Some(value), true) = (
+                let value = if let (Some(value), true) = (
                     cached_value,
                     response.status() == reqwest::StatusCode::NOT_MODIFIED,
                 ) {
@@ -340,10 +342,9 @@ impl Client {
                         .bytes()
                         .await
                         .map_err(Error::CannotRetrieveRequestBody)?;
-                    map_value(&bytes)?
+                    let value = map_value(&bytes)?;
+                    map_headers(value, &headers)
                 };
-
-                map_headers(&mut value, &headers);
 
                 if cache_kind != CacheKind::None {
                     if let Some(expires) = parsed_expires {
@@ -465,12 +466,12 @@ impl Client {
         page: i32,
     ) -> Result<GetAllianceContacts, Error> {
         let url = format!("alliances/{}/contacts/?page={}", alliance_id, page);
-        self.get_auth_no_cache_with_headers(&url, |contacts: &mut GetAllianceContacts, headers| {
+        self.get_auth_no_cache_with_headers(&url, |contacts: Vec<GetAllianceContact>, headers| {
             let pages = headers
                 .get("x-pages")
                 .and_then(|n| n.to_str().ok())
                 .and_then(|n| n.parse().ok());
-            contacts.pages = pages.or(contacts.pages);
+            GetAllianceContacts { contacts, pages }
         })
         .await
     }
@@ -483,12 +484,12 @@ impl Client {
         let url = format!("corporations/{}/contacts/?page={}", corporation_id, page);
         self.get_auth_no_cache_with_headers(
             &url,
-            |contacts: &mut GetCorporationContacts, headers| {
+            |contacts: Vec<GetCorporationContact>, headers| {
                 let pages = headers
                     .get("x-pages")
                     .and_then(|n| n.to_str().ok())
                     .and_then(|n| n.parse().ok());
-                contacts.pages = pages.or(contacts.pages);
+                GetCorporationContacts { contacts, pages }
             },
         )
         .await
@@ -497,12 +498,12 @@ impl Client {
     pub async fn get_character_contacts(&self, page: i32) -> Result<GetCharacterContacts, Error> {
         let character = self.profile.read().await.character.character_id;
         let url = format!("characters/{}/contacts/?page={}", character, page);
-        self.get_auth_no_cache_with_headers(&url, |contacts: &mut GetCharacterContacts, headers| {
+        self.get_auth_no_cache_with_headers(&url, |contacts: Vec<GetCharacterContact>, headers| {
             let pages = headers
                 .get("x-pages")
                 .and_then(|n| n.to_str().ok())
                 .and_then(|n| n.parse().ok());
-            contacts.pages = pages.or(contacts.pages);
+            GetCharacterContacts { contacts, pages }
         })
         .await
     }
@@ -647,10 +648,8 @@ pub struct GetAllianceContact {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(transparent)]
 pub struct GetAllianceContacts {
     pub contacts: Vec<GetAllianceContact>,
-    #[serde(skip)]
     pub pages: Option<i32>,
 }
 
@@ -661,10 +660,8 @@ pub struct GetCorporationContact {
     pub standing: f64,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(transparent)]
 pub struct GetCorporationContacts {
     pub contacts: Vec<GetCorporationContact>,
-    #[serde(skip)]
     pub pages: Option<i32>,
 }
 
@@ -678,10 +675,8 @@ pub struct GetCharacterContact {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(transparent)]
 pub struct GetCharacterContacts {
     pub contacts: Vec<GetCharacterContact>,
-    #[serde(skip)]
     pub pages: Option<i32>,
 }
 

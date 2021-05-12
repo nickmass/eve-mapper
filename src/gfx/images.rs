@@ -1,9 +1,10 @@
-use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 
 use super::QuadVertex;
 use crate::math;
 use crate::platform::{GraphicsBackend, SrgbTexture, U8U8U8U8};
+
+use ahash::AHashMap as HashMap;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Image {

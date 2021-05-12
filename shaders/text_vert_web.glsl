@@ -12,5 +12,5 @@ uniform vec2 u_window_size;
 void main () {
   v_uv = a_uv;
   v_color = a_color;
-  gl_Position = vec4((a_position.xy / u_window_size) * 2.0 - 1.0, 1.0, 1.0);
+  gl_Position = vec4(((a_position.xy / u_window_size) * 2.0 - 1.0) * vec2(1.0, -1.0), 1.0, 1.0);
 }

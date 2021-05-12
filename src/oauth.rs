@@ -1,6 +1,5 @@
+use ahash::AHashMap as HashMap;
 use serde::{Deserialize, Serialize};
-
-use std::collections::HashMap;
 
 use crate::error::*;
 use crate::platform::{read_file, write_file};
@@ -73,12 +72,13 @@ pub async fn refresh(mut profile: Profile) -> Result<Profile, Error> {
     let client = reqwest::Client::new();
     let token_request = client.post(OAUTH_TOKEN).form(&request_body);
     let token_response = token_request.send().await;
-    let token: AccessToken = token_response.unwrap().json().await.unwrap();
+
+    let token: AccessToken = token_response?.json().await?;
 
     profile.token = token;
 
-    let json = serde_json::to_vec(&profile).unwrap();
-    write_file("eve-profile.json", json).await.unwrap();
+    let json = serde_json::to_vec(&profile)?;
+    write_file("eve-profile.json", json).await?;
 
     Ok(profile)
 }
@@ -88,11 +88,11 @@ async fn verify(token: &AccessToken) -> Result<Character, Error> {
     let token_request = client
         .get(OAUTH_VERIFY)
         .header("Authorization", token.authorization());
-    let verify_response = token_request.send().await.map_err(|_| Error)?;
+    let verify_response = token_request.send().await?;
     if verify_response.status().is_server_error() || verify_response.status().is_client_error() {
-        Err(Error)
+        Err(Error::OauthVerify)
     } else {
-        let character: Character = verify_response.json().await.unwrap();
+        let character: Character = verify_response.json().await?;
         Ok(character)
     }
 }
@@ -126,13 +126,16 @@ impl AccessToken {
         format!("Bearer {}", self.access_token)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn now() -> u64 {
-        /*
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_else(|err| err.duration())
             .as_secs()
-        */
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn now() -> u64 {
         0
     }
 
@@ -378,6 +381,6 @@ mod auth {
     use super::*;
 
     pub async fn authorize() -> Result<Profile, Error> {
-        Err(Error)
+        Err(Error::OauthVerify)
     }
 }

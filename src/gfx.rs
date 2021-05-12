@@ -1,9 +1,9 @@
+use ahash::AHashSet as HashSet;
 use winit::event::{MouseButton, VirtualKeyCode};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
 use std::cell::Cell;
-use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -15,8 +15,7 @@ use crate::world::{Galaxy, JumpType, World};
 pub mod font;
 pub mod images;
 
-mod input;
-pub use input::{InputState, UserEventReceiver, UserEventSender};
+pub use crate::input::{InputState, UserEventReceiver, UserEventSender};
 
 mod map;
 use map::Map;
@@ -65,6 +64,7 @@ pub enum QueryEvent {
 struct UserState {
     window_size: math::V2<f32>,
     query_string: String,
+    text_nodes: Vec<font::PositionedTextSpan>,
 }
 
 pub struct GraphicsContext {
@@ -133,6 +133,7 @@ impl Window {
         let user_state = UserState {
             query_string: String::new(),
             window_size: math::v2(1024.0, 1024.0),
+            text_nodes: Vec::new(),
         };
 
         Window {
@@ -227,6 +228,7 @@ impl Window {
                     map.draw(&mut frame);
                     route_box.draw(&mut frame);
                     info_box.draw(&mut frame);
+
                     Window::draw(&mut frame, &graphics_context, &user_state);
 
                     graphics_context.display.end(frame);
@@ -251,8 +253,11 @@ impl Window {
         graphics_context: &GraphicsContext,
         user_state: &mut UserState,
     ) {
+        let mut query_changed = false;
+
         if input_state.text().len() > 0 {
             user_state.query_string.push_str(input_state.text());
+            query_changed = true;
             graphics_context.request_redraw("query text");
         }
 
@@ -286,11 +291,13 @@ impl Window {
                 )))
             }
             user_state.query_string = String::new();
+            query_changed = true;
             graphics_context.request_redraw("query return");
         }
 
         if input_state.was_key_down(VirtualKeyCode::Back) {
             user_state.query_string.pop();
+            query_changed = true;
             graphics_context.request_redraw("query back");
         }
 
@@ -304,30 +311,32 @@ impl Window {
 
         if let Some(window_size) = input_state.window_resized() {
             user_state.window_size = window_size.as_f32();
+            query_changed = true;
+        }
+
+        if query_changed {
+            user_state.text_nodes.clear();
+            if user_state.query_string.len() > 0 {
+                let mut text_span =
+                    font::TextSpan::new(30.0, graphics_context.ui_font, math::V4::fill(1.0));
+                text_span.push(user_state.query_string.as_str());
+                let text_span = graphics_context.font_cache.layout(
+                    text_span,
+                    font::TextAnchor::TopLeft,
+                    math::v2(5.0, user_state.window_size.y - 30.0),
+                    true,
+                );
+                user_state.text_nodes.push(text_span);
+            }
         }
     }
 
     fn draw(frame: &mut Frame, graphics_context: &GraphicsContext, user_state: &UserState) {
-        let mut pos_nodes = Vec::new();
-
-        if user_state.query_string.len() > 0 {
-            let mut text_span =
-                font::TextSpan::new(30.0, graphics_context.ui_font, math::V4::fill(1.0));
-            text_span.push(user_state.query_string.as_str());
-            let text_span = graphics_context.font_cache.layout(
-                text_span,
-                font::TextAnchor::TopLeft,
-                math::v2(5.0, user_state.window_size.y - 30.0),
-                true,
-            );
-            pos_nodes.push(text_span);
-        }
-
-        if pos_nodes.len() > 0 {
+        if user_state.text_nodes.len() > 0 {
             graphics_context.display.draw_text(
                 frame,
                 &graphics_context.font_cache,
-                &pos_nodes,
+                &user_state.text_nodes,
                 graphics_context.ui_scale(),
             );
         }
