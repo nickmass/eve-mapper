@@ -377,9 +377,9 @@ fn standing_color(standing: f64) -> math::V3<f32> {
 fn jump_type_color(jump: &JumpType) -> math::V3<f32> {
     match jump {
         JumpType::System => math::v3(0.0, 0.0, 1.0),
-        JumpType::Region => math::v3(0.1, 0.0, 0.15),
-        JumpType::Constellation => math::v3(0.2, 0.0, 0.0),
-        JumpType::JumpGate => math::v3(0.0, 0.2, 0.0),
+        JumpType::Region => math::v3(0.4, 0.0, 0.6),
+        JumpType::Constellation => math::v3(0.5, 0.0, 0.0),
+        JumpType::JumpGate => math::v3(0.0, 0.6, 0.0),
         JumpType::Wormhole => math::v3(0.1, 0.15, 0.0),
     }
 }

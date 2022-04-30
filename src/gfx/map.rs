@@ -429,7 +429,7 @@ impl Widget for Map {
                             continue;
                         }
 
-                        let color = math::V3::fill(0.6);
+                        let color = math::V3::fill(0.8);
 
                         let pos = pos + math::V2::fill(0.2 * self.current_zoom.min(50.0));
 
@@ -615,7 +615,7 @@ impl Widget for Map {
                     .values()
                     .filter_map(|system| {
                         if let Some(sov) = system.sovereignty_standing {
-                            let color = super::standing_color(sov).expand(0.3);
+                            let color = super::standing_color(sov).expand(0.65);
                             Some(SystemData {
                                 center: system.position,
                                 highlight: math::V4::fill(0.0),

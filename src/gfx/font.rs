@@ -6,6 +6,7 @@ use crate::math;
 use crate::platform::{GraphicsBackend, RgbTexture, U8};
 
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
+use fontdue::layout::GlyphRasterConfig;
 use fontdue::Font;
 
 pub trait FontData: std::any::Any {
@@ -27,7 +28,7 @@ impl FontData for NanumGothic {
     const DATA: &'static [u8] = include_bytes!("../../fonts/nanumgothic.ttf");
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Hash, Eq)]
 pub struct FontId(pub usize);
 
 impl From<FontId> for usize {
@@ -172,6 +173,12 @@ impl CacheCursor {
     }
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct GlyphKey {
+    font: FontId,
+    glyph: GlyphRasterConfig,
+}
+
 pub struct FontCache {
     cache_texture: RgbTexture<U8>,
     cache_width: u32,
@@ -179,7 +186,7 @@ pub struct FontCache {
     fonts: Vec<Font>,
     font_ids: HashMap<TypeId, FontId>,
     layout: RefCell<fontdue::layout::Layout<math::V4<f32>>>,
-    frame_glyphs: RefCell<HashSet<fontdue::layout::GlyphRasterConfig>>,
+    frame_glyphs: RefCell<HashSet<GlyphKey>>,
     cache_glyphs:
         RefCell<HashMap<fontdue::layout::GlyphRasterConfig, (math::Rect<f32>, math::Rect<f32>)>>,
     cache_cursor: CacheCursor,
@@ -263,7 +270,10 @@ impl FontCache {
 
         let mut frame_glyphs = self.frame_glyphs.borrow_mut();
         for glyph in &glyphs {
-            frame_glyphs.insert(glyph.key);
+            frame_glyphs.insert(GlyphKey {
+                font: FontId(glyph.font_index),
+                glyph: glyph.key,
+            });
         }
 
         PositionedTextSpan {
@@ -280,12 +290,12 @@ impl FontCache {
         let mut frame_glyphs = self.frame_glyphs.borrow_mut();
         let mut cache_glyphs = self.cache_glyphs.borrow_mut();
 
-        for glyph in frame_glyphs.drain() {
-            if cache_glyphs.contains_key(&glyph) {
+        for key in frame_glyphs.drain() {
+            if cache_glyphs.contains_key(&key.glyph) {
                 continue;
             }
-            if let Some(font) = self.fonts.get(glyph.font_index) {
-                let (metrics, data) = font.rasterize_indexed(glyph.glyph_index, glyph.px);
+            if let Some(font) = self.fonts.get(key.font.0) {
+                let (metrics, data) = font.rasterize_indexed(key.glyph.glyph_index, key.glyph.px);
                 if let Some(region) = self.cache_cursor.advance(metrics) {
                     display.update_texture(self.texture(), region, &data);
 
@@ -299,7 +309,7 @@ impl FontCache {
                         math::v2(metrics.width as f32, metrics.height as f32),
                     );
 
-                    cache_glyphs.insert(glyph, (uv, dimensions));
+                    cache_glyphs.insert(key.glyph, (uv, dimensions));
                 } else {
                     log::error!("font cache full");
                     self.cache_cursor.reset();

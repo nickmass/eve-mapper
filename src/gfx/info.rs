@@ -315,7 +315,7 @@ impl Widget for InfoBox {
             self.context.display.draw_quad(
                 frame,
                 &self.context.images,
-                math::v4(0.02, 0.02, 0.02, 0.85),
+                math::v4(0.1, 0.1, 0.1, 0.85),
                 background,
             );
 

@@ -1,3 +1,4 @@
+use glium::program::ProgramCreationInput;
 use notify::Watcher;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -141,8 +142,7 @@ impl ShaderCollection {
                 let vertex_source = std::fs::read_to_string(&vertex_path).unwrap();
                 let fragment_source = std::fs::read_to_string(&fragment_path).unwrap();
 
-                let shader_result =
-                    glium::Program::from_source(display, &vertex_source, &fragment_source, None);
+                let shader_result = program_from_source(display, &vertex_source, &fragment_source);
                 match shader_result {
                     Ok(program) => {
                         *shader = Shader {
@@ -169,12 +169,8 @@ impl ShaderCollection {
             let _ = self
                 .watcher
                 .watch(fragment_path, notify::RecursiveMode::NonRecursive);
-            let shader_result = glium::Program::from_source(
-                display,
-                S::vertex_source(),
-                S::fragment_source(),
-                None,
-            );
+            let shader_result =
+                program_from_source(display, S::vertex_source(), S::fragment_source());
             match shader_result {
                 Ok(program) => {
                     *shader = Some(Shader {
@@ -196,6 +192,25 @@ impl ShaderCollection {
     pub fn version(&self) -> usize {
         self.version.load(Ordering::Relaxed)
     }
+}
+
+fn program_from_source(
+    display: &glium::Display,
+    vertex_shader: &str,
+    fragment_shader: &str,
+) -> Result<glium::Program, glium::ProgramCreationError> {
+    let input = ProgramCreationInput::SourceCode {
+        vertex_shader,
+        fragment_shader,
+        tessellation_control_shader: None,
+        tessellation_evaluation_shader: None,
+        geometry_shader: None,
+        transform_feedback_varyings: None,
+        outputs_srgb: true,
+        uses_point_size: false,
+    };
+
+    glium::Program::new(display, input)
 }
 
 pub struct Shader<S: ShaderProgram> {

@@ -683,7 +683,6 @@ pub struct GetCharacterContacts {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GetCharacter {
     pub alliance_id: Option<i32>,
-    pub ancestry_id: Option<i32>,
     pub birthday: String,
     pub bloodline_id: i32,
     pub corporation_id: i32,

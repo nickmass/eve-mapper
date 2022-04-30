@@ -11,8 +11,8 @@ crate-type = ["cdylib", "rlib"]
 ahash = { version = "0.7.2", features = ["serde"] }
 base64 = "0.12.3"
 env_logger = "0.7.1"
-flexbuffers = "0.1.1"
-fontdue = { git = "https://github.com/mooman219/fontdue.git" }
+flexbuffers = "2.0.0"
+fontdue = "0.7"
 futures = "0.3.12"
 futures-intrusive = "0.4.0"
 log = "0.4.8"
@@ -37,14 +37,14 @@ wasm-bindgen-futures = "0.4.19"
 wasm-timer = "0.2.5"
 web-sys = { version =  "0.3.46", features = ["console", "Element", "Window","Document", "HtmlCanvasElement", "WebGlBuffer",
 "WebGlFramebuffer", "WebGlProgram","WebGlRenderingContext", "WebGlShader", "WebGlTexture", "WebGlUniformLocation"] }
-winit = { version = "0.24.0", features = ["web-sys"] }
+winit = { version = "0.26.1" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 async-std = { version = "1.9.0", features = ["tokio1"] }
-glium = "0.29.0"
+glium = "0.31.0"
 httpdate = "0.3.2"
 hyper = { version = "0.14.2", features = ["server", "http1"] }
 notify = "4.0.15"
 uuid = { version = "0.8.1", features = ["v4"] }
 webbrowser = "0.5.4"
-winit = "0.24.0"
+winit = "0.26.1"
